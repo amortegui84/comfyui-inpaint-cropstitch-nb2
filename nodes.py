@@ -1182,17 +1182,20 @@ class InpaintStitchNB2:
         feather = make_smoothstep_feather(
             ctc_h, ctc_w, feather_h_px, feather_w_px, device)  # [H, W]
 
-        # --- optional alpha channel ---
+        # --- blend mask: alpha takes priority, feather is the fallback ---
         if alpha_raw is not None:
-            # Treat alpha as a mask [1, H, W]
-            alpha_m = alpha_raw.squeeze(-1)
+            # The image already has a pre-computed alpha (e.g. from NB2AddAlpha).
+            # Use it directly as the blend mask — do NOT multiply with the stitch
+            # feather, because that would make even the centre semi-transparent
+            # and shift the visual position of the composite.
+            alpha_m = alpha_raw.squeeze(-1)   # [1, H, W]
             if ctc_w > alpha_m.shape[2] or ctc_h > alpha_m.shape[1]:
                 resized_alpha = processor.rescale_m(alpha_m, ctc_w, ctc_h, upscale_algo)
             else:
                 resized_alpha = processor.rescale_m(alpha_m, ctc_w, ctc_h, downscale_algo)
-            # Combine feather × alpha
-            blend_mask = feather.unsqueeze(0) * resized_alpha.clamp(0, 1)   # [1, H, W]
+            blend_mask = resized_alpha.clamp(0, 1)                           # [1, H, W]
         else:
+            # No alpha supplied → use the stitch's own edge feather.
             blend_mask = feather.unsqueeze(0).expand(B, -1, -1).clone()     # [B, H, W]
 
         # [B, H, W, 1] for broadcasting with RGB

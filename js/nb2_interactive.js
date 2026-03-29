@@ -27,6 +27,13 @@ function nb2AR(str) {
     return 1.0;
 }
 
+// NB2 output widths per aspect ratio / resolution — used to auto-size crop_width
+const NB2_WIDTHS = {
+    "16:9": { "1K": 1376, "2K": 2752, "4K": 5504 },
+    "9:16": { "1K":  768, "2K": 1536, "4K": 3072 },
+    "1:1":  { "1K": 1024, "2K": 2048, "4K": 4096 },
+};
+
 /** Try to get a cached image URL for a given node id from app.nodeOutputs */
 function getCachedImageUrl(nodeId) {
     const out = app.nodeOutputs?.[nodeId];
@@ -272,13 +279,29 @@ function attachNB2Canvas(node) {
         if (changed) { e.preventDefault(); render(); app.graph.setDirtyCanvas(true, true); }
     });
 
-    // re-render when dropdowns change
+    // re-render when dropdowns change; also auto-update crop_width on resolution/ar change
     ["aspect_ratio", "resolution"].forEach(name => {
         const w = nb2GetW(node, name);
         if (!w) return;
         const orig = w.callback;
-        w.callback = function (...a) { orig?.apply(this, a); setTimeout(render, 20); };
+        w.callback = function (...a) {
+            orig?.apply(this, a);
+            // After value settles, sync crop_width to the NB2 width for the new selection
+            setTimeout(() => {
+                if (imgW > 1) {
+                    const ar  = nb2GetW(node, "aspect_ratio")?.value ?? "16:9";
+                    const res = nb2GetW(node, "resolution")?.value   ?? "2K";
+                    const nb2W = NB2_WIDTHS[ar]?.[res] ?? 2752;
+                    nb2SetW(node, "crop_width", Math.min(nb2W, imgW));
+                }
+                render();
+            }, 20);
+        };
     });
+
+    // Re-render when the node is resized so the image stays letterboxed correctly
+    const resizeObs = new ResizeObserver(() => render());
+    resizeObs.observe(cvs);
 
     // ── addDOMWidget ──────────────────────────────────────────────────────
     const domW = node.addDOMWidget("_nb2_canvas", "nb2canvas", cvs, {
@@ -297,6 +320,14 @@ function attachNB2Canvas(node) {
         const cyW = nb2GetW(node, "center_y");
         if (cxW && cxW.value === 512) cxW.value = Math.round(imgW / 2);
         if (cyW && cyW.value === 512) cyW.value = Math.round(imgH / 2);
+        // Set crop_width to the NB2 width for the current selection, clamped to image
+        const ar  = nb2GetW(node, "aspect_ratio")?.value ?? "16:9";
+        const res = nb2GetW(node, "resolution")?.value   ?? "2K";
+        const cwW = nb2GetW(node, "crop_width");
+        if (cwW) {
+            const nb2W = NB2_WIDTHS[ar]?.[res] ?? 2752;
+            cwW.value = Math.min(nb2W, imgW);
+        }
         render();
         app.graph.setDirtyCanvas(true, true);
     };
