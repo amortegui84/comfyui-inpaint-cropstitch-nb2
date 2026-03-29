@@ -735,51 +735,56 @@ class GPUProcessorLogic(ProcessorLogic):
 
 
 # ---------------------------------------------------------------------------
-# Preview helper — draws the crop rectangle on the image and saves to temp
+# Preview helper — draws the crop rectangle and returns tensor + temp file
 # ---------------------------------------------------------------------------
 
-def _save_nb2_preview(img_tensor: torch.Tensor, y1: int, x1: int,
-                      ch: int, cw: int) -> dict | None:
-    """Render the crop rectangle on a copy of the image and save to temp dir.
+def _make_nb2_preview(img_tensor: torch.Tensor, y1: int, x1: int,
+                      ch: int, cw: int):
+    """Draw the NB2 crop rectangle on the image.
 
-    Returns a ComfyUI image-info dict suitable for ``ui.nb2_preview``,
-    or None if folder_paths is unavailable (outside ComfyUI).
+    Returns
+    -------
+    preview_tensor : torch.Tensor  [1, H, W, 3]  float32 in [0, 1]
+    temp_info      : dict or None   ComfyUI image-info for ui.nb2_preview
     """
-    if not _HAS_FOLDER_PATHS:
-        return None
-    try:
-        img_np = (img_tensor.cpu().float().clamp(0, 1).numpy() * 255).astype(np.uint8)
-        base = Image.fromarray(img_np, "RGB").convert("RGBA")
+    # Always work in RGB
+    img_np = (img_tensor.cpu().float().clamp(0, 1).numpy() * 255).astype(np.uint8)
+    rgb_np = img_np[:, :, :3]  # strip alpha if present
 
-        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+    base = Image.fromarray(rgb_np, "RGB").convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-        # Semi-transparent fill
-        draw.rectangle([x1, y1, x1 + cw - 1, y1 + ch - 1],
-                       fill=(0, 140, 255, 45))
-        # Border (3 px thick)
-        for t in range(3):
-            draw.rectangle([x1 + t, y1 + t,
-                            x1 + cw - 1 - t, y1 + ch - 1 - t],
-                           outline=(0, 200, 255, 220))
+    draw.rectangle([x1, y1, x1 + cw - 1, y1 + ch - 1], fill=(0, 140, 255, 45))
+    for t in range(3):
+        draw.rectangle([x1 + t, y1 + t, x1 + cw - 1 - t, y1 + ch - 1 - t],
+                       outline=(0, 200, 255, 220))
+    cx, cy = x1 + cw // 2, y1 + ch // 2
+    cs = max(10, min(cw, ch) // 25)
+    draw.line([cx - cs, cy, cx + cs, cy], fill=(255, 255, 255, 210), width=2)
+    draw.line([cx, cy - cs, cx, cy + cs], fill=(255, 255, 255, 210), width=2)
 
-        # Centre crosshair
-        cx, cy = x1 + cw // 2, y1 + ch // 2
-        cs = max(10, min(cw, ch) // 25)
-        draw.line([cx - cs, cy, cx + cs, cy], fill=(255, 255, 255, 210), width=2)
-        draw.line([cx, cy - cs, cx, cy + cs], fill=(255, 255, 255, 210), width=2)
+    base.alpha_composite(overlay)
+    rgb_out = base.convert("RGB")
 
-        base.alpha_composite(overlay)
+    # tensor [1, H, W, 3]
+    preview_tensor = torch.from_numpy(
+        np.array(rgb_out).astype(np.float32) / 255.0
+    ).unsqueeze(0)
 
-        temp_dir = _folder_paths.get_temp_directory()
-        os.makedirs(temp_dir, exist_ok=True)
-        fname = f"nb2_prev_{uuid.uuid4().hex[:10]}.png"
-        base.convert("RGB").save(os.path.join(temp_dir, fname))
+    # save to temp for JS widget
+    temp_info = None
+    if _HAS_FOLDER_PATHS:
+        try:
+            temp_dir = _folder_paths.get_temp_directory()
+            os.makedirs(temp_dir, exist_ok=True)
+            fname = f"nb2_prev_{uuid.uuid4().hex[:10]}.png"
+            rgb_out.save(os.path.join(temp_dir, fname))
+            temp_info = {"filename": fname, "subfolder": "", "type": "temp"}
+        except Exception as exc:
+            print(f"[NB2] Preview save failed: {exc}")
 
-        return {"filename": fname, "subfolder": "", "type": "temp"}
-    except Exception as exc:
-        print(f"[NB2] Preview save failed: {exc}")
-        return None
+    return preview_tensor, temp_info
 
 
 # ===========================================================================
@@ -827,14 +832,15 @@ class NanoBanana2MaskGen:
             }
         }
 
-    RETURN_TYPES  = ("MASK", "INT", "INT")
-    RETURN_NAMES  = ("mask", "nb2_width", "nb2_height")
+    RETURN_TYPES  = ("MASK", "INT", "INT", "IMAGE")
+    RETURN_NAMES  = ("mask", "nb2_width", "nb2_height", "preview_image")
     FUNCTION      = "generate_mask"
     CATEGORY      = "inpaint/nb2"
     DESCRIPTION   = (
         "Creates a positioned rectangle mask matching Nano Banana 2 aspect "
-        "ratios.  Connect the mask to InpaintCropNB2 and the nb2_width / "
-        "nb2_height outputs to any node that needs the target resolution."
+        "ratios.  Connect mask → InpaintCropNB2, nb2_width/nb2_height → NB2 "
+        "Crop inputs, and preview_image → any Preview Image node to see the "
+        "crop position annotated on the original."
     )
 
     def generate_mask(self, image, aspect_ratio, resolution,
@@ -865,11 +871,14 @@ class NanoBanana2MaskGen:
         mask = torch.zeros(B, H, W, dtype=torch.float32)
         mask[:, y1:y1 + ch, x1:x1 + cw] = 1.0
 
-        # --- send annotated preview to the interactive JS widget ---
-        preview = _save_nb2_preview(image[0], y1, x1, ch, cw)
-        result = {"result": (mask, nb2_w, nb2_h)}
-        if preview:
-            result["ui"] = {"nb2_preview": [preview]}
+        # Build preview for both the IMAGE output and the JS canvas widget
+        preview_tensor, temp_info = _make_nb2_preview(image[0], y1, x1, ch, cw)
+        # Replicate preview for every item in the batch
+        preview_batch = preview_tensor.expand(B, -1, -1, -1)
+
+        result = {"result": (mask, nb2_w, nb2_h, preview_batch)}
+        if temp_info:
+            result["ui"] = {"nb2_preview": [temp_info]}
         return result
 
 
@@ -1190,11 +1199,76 @@ class InpaintStitchNB2:
         blend_mask = blend_mask.unsqueeze(-1)
 
         # --- composite ---
-        canvas_crop = canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w]
-        blended = blend_mask * resized_rgb + (1.0 - blend_mask) * canvas_crop
-        canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = blended
+        # canvas_image may be RGBA if the original input had alpha.
+        # Always blend in RGB space to avoid channel-count mismatches,
+        # then output clean RGB regardless of input format.
+        canvas_crop_full = canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w]
+        canvas_crop_rgb  = canvas_crop_full[..., :3]
 
-        return canvas_image[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w]
+        blended_rgb = blend_mask * resized_rgb + (1.0 - blend_mask) * canvas_crop_rgb
+
+        # Write blended RGB back; keep canvas alpha channel if it existed
+        if canvas_image.shape[-1] == 4:
+            canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = torch.cat(
+                [blended_rgb, canvas_crop_full[..., 3:4]], dim=-1)
+        else:
+            canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = blended_rgb
+
+        # Always return RGB — downstream nodes don't expect alpha from a stitch
+        return canvas_image[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w, :3]
+
+
+# ===========================================================================
+#  NEW NODE 4 — NB2AddAlpha
+# ===========================================================================
+
+class NB2AddAlpha:
+    """
+    Converts an RGB image to RGBA by generating a feathered alpha channel.
+
+    The alpha is a smoothstep gradient: 0 at every edge, 1 in the centre.
+    Use this after Nano Banana 2 generation when you want a compositable
+    layer with soft edges — pipe the RGBA into NB2 Stitch or any compositor.
+
+    feather_percent controls the ramp width as a percentage of each
+    dimension (e.g. 5 → 5 % of width on left & right, 5 % of height on
+    top & bottom).  Set to 0 for a hard rectangular alpha.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "feather_percent": ("FLOAT", {
+                    "default": 5.0, "min": 0.0, "max": 50.0, "step": 0.1,
+                    "tooltip": ("Width of the edge fade as %% of image size. "
+                                "0 = hard edges, 50 = fully fades to centre.")}),
+            }
+        }
+
+    RETURN_TYPES  = ("IMAGE",)
+    RETURN_NAMES  = ("rgba_image",)
+    FUNCTION      = "add_alpha"
+    CATEGORY      = "inpaint/nb2"
+    DESCRIPTION   = (
+        "Adds a smoothstep feathered alpha channel to an RGB image.  "
+        "Useful to pre-compute soft edges on the NB2 output before stitching."
+    )
+
+    def add_alpha(self, image, feather_percent):
+        B, H, W, _C = image.shape
+        rgb = image[..., :3]   # ensure we work in RGB even if input is RGBA
+
+        fh = int(H * feather_percent / 100.0)
+        fw = int(W * feather_percent / 100.0)
+        feather = make_smoothstep_feather(H, W, fh, fw, image.device)  # [H, W]
+
+        # Broadcast to [B, H, W, 1]
+        alpha = feather.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, 1)
+
+        rgba = torch.cat([rgb, alpha], dim=-1)  # [B, H, W, 4]
+        return (rgba,)
 
 
 # ===========================================================================
@@ -1205,10 +1279,12 @@ NODE_CLASS_MAPPINGS = {
     "NanoBanana2MaskGen":  NanoBanana2MaskGen,
     "InpaintCropNB2":      InpaintCropNB2,
     "InpaintStitchNB2":    InpaintStitchNB2,
+    "NB2AddAlpha":         NB2AddAlpha,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NanoBanana2MaskGen":  "🎯 NB2 Mask Generator",
     "InpaintCropNB2":      "✂️ NB2 Crop",
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
+    "NB2AddAlpha":         "🔲 NB2 Add Alpha",
 }
