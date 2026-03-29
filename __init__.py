@@ -1,5 +1,7 @@
 from .nodes import NanoBanana2MaskGen, InpaintCropNB2, InpaintStitchNB2
 
+WEB_DIRECTORY = "js"
+
 NODE_CLASS_MAPPINGS = {
     "NanoBanana2MaskGen": NanoBanana2MaskGen,
     "InpaintCropNB2":     InpaintCropNB2,

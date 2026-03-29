@@ -36,12 +36,21 @@ import comfy.model_management
 import math
 import nodes
 import numpy as np
+import os
+import uuid
 import torch
 import torch.nn.functional as TF
 import torchvision.transforms.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter, grey_dilation, binary_closing, binary_fill_holes
 from abc import ABC, abstractmethod
+
+try:
+    import folder_paths as _folder_paths
+    _HAS_FOLDER_PATHS = True
+except ImportError:
+    _folder_paths = None
+    _HAS_FOLDER_PATHS = False
 
 
 # ---------------------------------------------------------------------------
@@ -697,22 +706,80 @@ class GPUProcessorLogic(ProcessorLogic):
                       target_w, target_h, padding,
                       downscale_algorithm, upscale_algorithm,
                       resize_output=True):
-        # Logic is identical to CPU version; delegate
+        # Run on CPU to keep PIL rescaling simple; restore device on outputs.
+        device = image.device
         cpu = CPUProcessorLogic()
-        return cpu.crop_magic_im(image, mask, x, y, w, h,
-                                 target_w, target_h, padding,
-                                 downscale_algorithm, upscale_algorithm,
-                                 resize_output)
+        (canvas, cto_x, cto_y, cto_w, cto_h,
+         cropped, cmask,
+         ctc_x, ctc_y, ctc_w, ctc_h) = cpu.crop_magic_im(
+            image.cpu(), mask.cpu(), x, y, w, h,
+            target_w, target_h, padding,
+            downscale_algorithm, upscale_algorithm,
+            resize_output)
+        return (canvas.to(device), cto_x, cto_y, cto_w, cto_h,
+                cropped.to(device), cmask.to(device),
+                ctc_x, ctc_y, ctc_w, ctc_h)
 
     def stitch_magic_im(self, canvas_image, inpainted_image, mask,
                         ctc_x, ctc_y, ctc_w, ctc_h,
                         cto_x, cto_y, cto_w, cto_h,
                         downscale_algorithm, upscale_algorithm):
+        device = canvas_image.device
         cpu = CPUProcessorLogic()
-        return cpu.stitch_magic_im(canvas_image, inpainted_image, mask,
-                                   ctc_x, ctc_y, ctc_w, ctc_h,
-                                   cto_x, cto_y, cto_w, cto_h,
-                                   downscale_algorithm, upscale_algorithm)
+        result = cpu.stitch_magic_im(
+            canvas_image.cpu(), inpainted_image.cpu(), mask.cpu(),
+            ctc_x, ctc_y, ctc_w, ctc_h,
+            cto_x, cto_y, cto_w, cto_h,
+            downscale_algorithm, upscale_algorithm)
+        return result.to(device)
+
+
+# ---------------------------------------------------------------------------
+# Preview helper — draws the crop rectangle on the image and saves to temp
+# ---------------------------------------------------------------------------
+
+def _save_nb2_preview(img_tensor: torch.Tensor, y1: int, x1: int,
+                      ch: int, cw: int) -> dict | None:
+    """Render the crop rectangle on a copy of the image and save to temp dir.
+
+    Returns a ComfyUI image-info dict suitable for ``ui.nb2_preview``,
+    or None if folder_paths is unavailable (outside ComfyUI).
+    """
+    if not _HAS_FOLDER_PATHS:
+        return None
+    try:
+        img_np = (img_tensor.cpu().float().clamp(0, 1).numpy() * 255).astype(np.uint8)
+        base = Image.fromarray(img_np, "RGB").convert("RGBA")
+
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        # Semi-transparent fill
+        draw.rectangle([x1, y1, x1 + cw - 1, y1 + ch - 1],
+                       fill=(0, 140, 255, 45))
+        # Border (3 px thick)
+        for t in range(3):
+            draw.rectangle([x1 + t, y1 + t,
+                            x1 + cw - 1 - t, y1 + ch - 1 - t],
+                           outline=(0, 200, 255, 220))
+
+        # Centre crosshair
+        cx, cy = x1 + cw // 2, y1 + ch // 2
+        cs = max(10, min(cw, ch) // 25)
+        draw.line([cx - cs, cy, cx + cs, cy], fill=(255, 255, 255, 210), width=2)
+        draw.line([cx, cy - cs, cx, cy + cs], fill=(255, 255, 255, 210), width=2)
+
+        base.alpha_composite(overlay)
+
+        temp_dir = _folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        fname = f"nb2_prev_{uuid.uuid4().hex[:10]}.png"
+        base.convert("RGB").save(os.path.join(temp_dir, fname))
+
+        return {"filename": fname, "subfolder": "", "type": "temp"}
+    except Exception as exc:
+        print(f"[NB2] Preview save failed: {exc}")
+        return None
 
 
 # ===========================================================================
@@ -785,7 +852,7 @@ class NanoBanana2MaskGen:
             ch = H
             cw = int(round(ch * ar))
             cw = min(cw, W)
-            ch = int(round(cw / ar))   # recompute after clamping width
+            ch = int(round(cw / ar))
 
         # --- top-left from centre ---
         x1 = center_x - cw // 2
@@ -798,7 +865,12 @@ class NanoBanana2MaskGen:
         mask = torch.zeros(B, H, W, dtype=torch.float32)
         mask[:, y1:y1 + ch, x1:x1 + cw] = 1.0
 
-        return (mask, nb2_w, nb2_h)
+        # --- send annotated preview to the interactive JS widget ---
+        preview = _save_nb2_preview(image[0], y1, x1, ch, cw)
+        result = {"result": (mask, nb2_w, nb2_h)}
+        if preview:
+            result["ui"] = {"nb2_preview": [preview]}
+        return result
 
 
 # ===========================================================================
