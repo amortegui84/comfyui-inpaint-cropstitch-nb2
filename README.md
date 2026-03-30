@@ -82,16 +82,16 @@ When you change `resolution` or `aspect_ratio`, `crop_width` is automatically se
 
 Crops the source image around the masked region and scales the result to the **exact NB2 resolution**, so Nano Banana 2 receives a pixel-perfect input regardless of the original image size.
 
-Wire `nb2_width` and `nb2_height` from **NB2 Mask Generator** to guarantee the crop matches NB2's expected dimensions.
+Set `aspect_ratio` and `resolution` to the **same values** you chose in NB2 Mask Generator. The node computes the target dimensions internally — no INT wiring required.
 
 **Inputs**
 
 | Name | Type | Description |
 |---|---|---|
 | image | IMAGE | Original source image |
-| mask | MASK | Mask from NB2 Mask Generator |
-| nb2_width | INT | Target width — wire from NB2 Mask Generator |
-| nb2_height | INT | Target height — wire from NB2 Mask Generator |
+| mask | MASK | Mask from NB2 Mask Generator (optional — full image if not connected) |
+| aspect_ratio | choice | 16:9 · 9:16 · 1:1 — must match NB2 Mask Generator |
+| resolution | choice | 1K · 2K · 4K — must match NB2 Mask Generator |
 | downscale_algorithm | choice | Algorithm used when the crop is larger than the target |
 | upscale_algorithm | choice | Algorithm used when the crop is smaller than the target |
 
@@ -153,9 +153,10 @@ NB2 Mask Generator                                         │
   aspect_ratio · resolution · center_x / center_y          │
   crop_width (auto-set when resolution changes)            │
       │                                                     │
-      │  mask   nb2_width   nb2_height                      │
+      │  mask                                               │
       ▼                                                     │
 NB2 Crop ────────────────────────────────────────────── (canvas)
+  aspect_ratio · resolution  ← set same values as above
       │
       │  stitcher      cropped_image (exact NB2 resolution)
       │                      │

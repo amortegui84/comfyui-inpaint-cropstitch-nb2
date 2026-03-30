@@ -21,10 +21,10 @@ Intended workflow
 -----------------
   [original image]
        |
-  NanoBanana2MaskGen  <-- pick aspect ratio, resolution, center X/Y
-       | mask  nb2_width  nb2_height
-  InpaintCropNB2      <-- crops and scales to exact NB2 resolution
-       | stitcher  cropped_image
+  NanoBanana2MaskGen  <-- pick aspect_ratio, resolution, center X/Y
+       | mask
+  InpaintCropNB2      <-- set same aspect_ratio + resolution; crops and
+       | stitcher  cropped_image    scales to exact NB2 resolution
   [Nano Banana 2]     <-- generation (no mask needed, RGB output)
        | generated_image
   InpaintStitchNB2    <-- feathered composite back onto original
@@ -891,13 +891,9 @@ class InpaintCropNB2:
     Crops the image around the mask and scales the result to the exact
     resolution expected / produced by Nano Banana 2.
 
-    Compared with the original Inpaint Crop node this version:
-      - Reads the target resolution from nb2_width / nb2_height INT inputs
-        (typically wired from NanoBanana2MaskGen) so the crop is always
-        pixel-perfect for NB2.
-      - Removes parameters that are not useful in the NB2 workflow
-        (preresize, outpainting extension, debug outputs).
-      - Always scales the output to the exact NB2 resolution.
+    Select the same aspect_ratio and resolution that you will use in
+    NanoBanana2MaskGen.  The node computes nb2_width / nb2_height internally
+    from those dropdowns — no INT wiring required.
 
     The STITCHER output carries all information needed by InpaintStitchNB2
     to composite the generated image back onto the original canvas.
@@ -908,12 +904,12 @@ class InpaintCropNB2:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "nb2_width":  ("INT", {
-                    "default": 2752, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1,
-                    "tooltip": "Target width (wire from NanoBanana2MaskGen or set manually)."}),
-                "nb2_height": ("INT", {
-                    "default": 1536, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1,
-                    "tooltip": "Target height (wire from NanoBanana2MaskGen or set manually)."}),
+                "aspect_ratio": (["16:9", "9:16", "1:1"], {
+                    "default": "16:9",
+                    "tooltip": "Must match the aspect_ratio set in NB2 Mask Generator."}),
+                "resolution":   (["1K", "2K", "4K"], {
+                    "default": "2K",
+                    "tooltip": "Must match the resolution set in NB2 Mask Generator."}),
                 "context_extend_factor": ("FLOAT", {
                     "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.01,
                     "tooltip": ("Grow the crop region by this factor in every direction before "
@@ -936,13 +932,15 @@ class InpaintCropNB2:
     CATEGORY      = "inpaint/nb2"
     DESCRIPTION   = (
         "Crops the image to the mask region and scales to the exact Nano "
-        "Banana 2 resolution.  Pair with InpaintStitchNB2 after generation."
+        "Banana 2 resolution.  Set aspect_ratio and resolution to match "
+        "NB2 Mask Generator.  Pair with InpaintStitchNB2 after generation."
     )
 
-    def inpaint_crop_nb2(self, image, nb2_width, nb2_height,
+    def inpaint_crop_nb2(self, image, aspect_ratio, resolution,
                          context_extend_factor,
                          downscale_algorithm, upscale_algorithm,
                          device_mode, mask=None):
+        nb2_width, nb2_height = NB2_RESOLUTIONS[aspect_ratio][resolution]
         image = image.clone()
         if mask is not None:
             mask = mask.clone()
