@@ -299,8 +299,19 @@ function attachNB2Canvas(node) {
         };
     });
 
-    // Re-render when the node is resized so the image stays letterboxed correctly
-    const resizeObs = new ResizeObserver(() => render());
+    // Re-render when the node is resized so the image stays letterboxed correctly.
+    //
+    // LiteGraph updates the DOM widget container width via inline style.width before
+    // the browser has reflowed, so cvs.offsetWidth is stale at that moment.
+    // Hooking node.onResize (called directly by LiteGraph) + requestAnimationFrame
+    // ensures we read the correct width after the layout pass.
+    const origOnResize = node.onResize;
+    node.onResize = function (size) {
+        origOnResize?.apply(this, arguments);
+        requestAnimationFrame(render);
+    };
+    // ResizeObserver as secondary net (handles other resize sources)
+    const resizeObs = new ResizeObserver(() => requestAnimationFrame(render));
     resizeObs.observe(cvs);
 
     // ── addDOMWidget ──────────────────────────────────────────────────────
