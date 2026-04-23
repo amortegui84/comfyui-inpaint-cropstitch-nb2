@@ -6,6 +6,12 @@ Fork of [ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpa
 
 ---
 
+## Demo
+
+<video src="assets/demo.mp4" controls title="ComfyUI-Inpaint-CropStitch-NB2 demo">
+  <a href="assets/demo.mp4">Demo video</a>
+</video>
+
 ## Why these nodes exist
 
 Traditional inpainting workflows require a mask — you draw the area you want to regenerate and the model fills it in. **Nano Banana 2 is a generation model, not an inpainting model**: it does not accept a mask. It takes a clean image and generates a new one at a fixed resolution.
@@ -181,6 +187,13 @@ NB2 Crop ───────────────────────�
 - **Feather**: `edge_feather_percent` between 3 and 8 is usually enough for a natural blend. Increase it if the original and generated areas have very different lighting.
 
 ---
+
+
+## Workflow
+
+A ready-to-use ComfyUI workflow is included in this repo.  
+[Download inpainting_workflow.json](workflows/inpainting_workflow.json)
+
 
 ## Installation
 

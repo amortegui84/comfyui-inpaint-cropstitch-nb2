@@ -1,0 +1,726 @@
+{
+  "id": "8ec10854-7568-4d69-8884-52fa460bd017",
+  "revision": 0,
+  "last_node_id": 26,
+  "last_link_id": 60,
+  "nodes": [
+    {
+      "id": 22,
+      "type": "PreviewImage",
+      "pos": [
+        2118.2570967355837,
+        1096.48903473131
+      ],
+      "size": [
+        140,
+        246
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 52
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.19.3",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 26,
+      "type": "ImageBatchMulti",
+      "pos": [
+        2740.6265689749453,
+        897.6191182088631
+      ],
+      "size": [
+        270,
+        102
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image_1",
+          "type": "IMAGE",
+          "link": 58
+        },
+        {
+          "name": "image_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 57
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            56
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "38cccdee6a484a702e4ac1a8b9a3cee0c4ed83f4",
+        "Node name for S&R": "ImageBatchMulti"
+      },
+      "widgets_values": [
+        2,
+        null
+      ]
+    },
+    {
+      "id": 11,
+      "type": "NB2AddAlpha",
+      "pos": [
+        3578.697538765651,
+        867.3531581202056
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 60
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rgba_image",
+          "type": "IMAGE",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "ver": "d14ecd5b2015d957615b14be1bcfda688dc8c231",
+        "Node name for S&R": "NB2AddAlpha"
+      },
+      "widgets_values": [
+        6
+      ]
+    },
+    {
+      "id": 10,
+      "type": "InpaintStitchNB2",
+      "pos": [
+        3881.6655075833214,
+        847.1911669531571
+      ],
+      "size": [
+        288.0546875,
+        78
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "link": 18
+        },
+        {
+          "name": "inpainted_image",
+          "type": "IMAGE",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            53,
+            55
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "ver": "d14ecd5b2015d957615b14be1bcfda688dc8c231",
+        "Node name for S&R": "InpaintStitchNB2"
+      },
+      "widgets_values": [
+        6
+      ]
+    },
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        2434.4020386924826,
+        907.6640158116754
+      ],
+      "size": [
+        282.798828125,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            57
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.2",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "Copy of Compositor Node_Gemini 3.1 Flash (Nano Banana 2)_2026-04-23_15-32-09.png",
+        "image"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "TextBox1",
+      "pos": [
+        2732.1321250452575,
+        1049.5770201645232
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "text1",
+          "type": "STRING",
+          "links": [
+            59
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "RES4LYF",
+        "ver": "0dc91c00c4c3fb38e7874fcd7a2a327765e8882c",
+        "Node name for S&R": "TextBox1"
+      },
+      "widgets_values": [
+        "MAIN OBJECTIVE\nUse Image 1 as the absolute base image. Replace the original clothing in Image 1 with the outfit shown in Image 2.\n\nIMAGE PRIORITY\n\nImage 1 = absolute base\nkeep exact camera position, framing, crop, focal length, pose, body proportions, face, skin, lighting, shadows, and background\nImage 2 = garment reference only\nuse only the clothing visible in Image 2\n\nGARMENT REPLACEMENT RULE\nRemove all original clothing from Image 1 and replace it with the outfit from Image 2 only.\n\nCRITICAL GARMENT RESTRICTIONS\n\ntransfer only the garments that are visibly present in Image 2\ndo not invent, add, or infer any extra clothing layers\ndo not create undershirts, inner shirts, base layers, collars, extensions, or hidden garments unless they are clearly visible in Image 2\nif a shirt in Image 2 is visible as a single layer, the final result must remain a single visible layer\nzero remnants of the original clothing from Image 1\nzero new garment elements beyond what is visible in Image 2\n\nADAPTATION RULE\nAdapt the garment from Image 2 naturally onto the body of Image 1, preserving realistic fit, fabric tension, folds, and gravity.\n\nDO NOT CHANGE\nNo camera change, no crop change, no pose change, no lighting change, no background change, no identity change.\n\nOUTPUT\nPhotorealistic full-body result, clean garment replacement, no extra layers, no artifacts."
+      ]
+    },
+    {
+      "id": 23,
+      "type": "SaveImage",
+      "pos": [
+        3888.5989230610508,
+        974.2774015688199
+      ],
+      "size": [
+        270,
+        270
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 53
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.19.3",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "ComfyUI"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "LoadImage",
+      "pos": [
+        1540.0610214215208,
+        830.3291811090726
+      ],
+      "size": [
+        282.798828125,
+        314.0000000000001
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            10,
+            48,
+            54
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.2",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "Copy of Compositor Node_Gemini 3.1 Flash (Nano Banana 2)_2026-04-23_15-33-31.png",
+        "image"
+      ]
+    },
+    {
+      "id": 21,
+      "type": "NanoBanana2MaskGen",
+      "pos": [
+        1844.9678800493405,
+        896.4210823195176
+      ],
+      "size": [
+        243.78001161700195,
+        478.2739924285985
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 48
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            49,
+            50
+          ]
+        },
+        {
+          "name": "nb2_width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "nb2_height",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "preview_image",
+          "type": "IMAGE",
+          "links": [
+            52
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "ver": "d14ecd5b2015d957615b14be1bcfda688dc8c231",
+        "Node name for S&R": "NanoBanana2MaskGen"
+      },
+      "widgets_values": [
+        "9:16",
+        "2K",
+        1876,
+        1954,
+        1536,
+        ""
+      ]
+    },
+    {
+      "id": 9,
+      "type": "InpaintCropNB2",
+      "pos": [
+        2121.951239308376,
+        835.9179816976614
+      ],
+      "size": [
+        289.455078125,
+        218
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 10
+        },
+        {
+          "name": "mask",
+          "shape": 7,
+          "type": "MASK",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "links": [
+            18
+          ]
+        },
+        {
+          "name": "cropped_image",
+          "type": "IMAGE",
+          "links": [
+            58
+          ]
+        },
+        {
+          "name": "cropped_mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "ver": "d14ecd5b2015d957615b14be1bcfda688dc8c231",
+        "Node name for S&R": "InpaintCropNB2"
+      },
+      "widgets_values": [
+        "9:16",
+        "2K",
+        1,
+        "bilinear",
+        "bicubic",
+        "gpu (much faster)"
+      ]
+    },
+    {
+      "id": 25,
+      "type": "GeminiNanoBanana2",
+      "pos": [
+        3157.19992885175,
+        861.7851607577817
+      ],
+      "size": [
+        400,
+        392
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 56
+        },
+        {
+          "name": "files",
+          "shape": 7,
+          "type": "GEMINI_INPUT_FILES",
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": 59
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            60
+          ]
+        },
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "thought_image",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.19.3",
+        "Node name for S&R": "GeminiNanoBanana2"
+      },
+      "widgets_values": [
+        "",
+        "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        712768055696861,
+        "randomize",
+        "9:16",
+        "4K",
+        "IMAGE",
+        "MINIMAL",
+        "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input—regardless of format, intent, or abstraction—as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests."
+      ],
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 14,
+      "type": "MaskPreview+",
+      "pos": [
+        2270.5359266178093,
+        1101.4310537911438
+      ],
+      "size": [
+        155.071875,
+        246
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 50
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfyui_essentials",
+        "ver": "1.1.0",
+        "Node name for S&R": "MaskPreview+"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 24,
+      "type": "Image Comparer (rgthree)",
+      "pos": [
+        4197.1120524551625,
+        846.3649456872729
+      ],
+      "size": [
+        499.9657149482804,
+        441.5447334143478
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "dir": 3,
+          "name": "image_a",
+          "type": "IMAGE",
+          "link": 54
+        },
+        {
+          "dir": 3,
+          "name": "image_b",
+          "type": "IMAGE",
+          "link": 55
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "683836c46e898668936c433502504cc0627482c5",
+        "comparer_mode": "Slide"
+      },
+      "widgets_values": [
+        [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_gtdfp_00001_.png&type=temp&subfolder=&rand=0.43812273410021063"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_gtdfp_00002_.png&type=temp&subfolder=&rand=0.7362514169484633"
+          }
+        ]
+      ]
+    }
+  ],
+  "links": [
+    [
+      10,
+      5,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      17,
+      11,
+      0,
+      10,
+      1,
+      "IMAGE"
+    ],
+    [
+      18,
+      9,
+      0,
+      10,
+      0,
+      "STITCHER"
+    ],
+    [
+      48,
+      5,
+      0,
+      21,
+      0,
+      "IMAGE"
+    ],
+    [
+      49,
+      21,
+      0,
+      9,
+      1,
+      "MASK"
+    ],
+    [
+      50,
+      21,
+      0,
+      14,
+      0,
+      "MASK"
+    ],
+    [
+      52,
+      21,
+      3,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      53,
+      10,
+      0,
+      23,
+      0,
+      "IMAGE"
+    ],
+    [
+      54,
+      5,
+      0,
+      24,
+      0,
+      "IMAGE"
+    ],
+    [
+      55,
+      10,
+      0,
+      24,
+      1,
+      "IMAGE"
+    ],
+    [
+      56,
+      26,
+      0,
+      25,
+      0,
+      "IMAGE"
+    ],
+    [
+      57,
+      1,
+      0,
+      26,
+      1,
+      "IMAGE"
+    ],
+    [
+      58,
+      9,
+      1,
+      26,
+      0,
+      "IMAGE"
+    ],
+    [
+      59,
+      4,
+      0,
+      25,
+      2,
+      "STRING"
+    ],
+    [
+      60,
+      25,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0152559799477054,
+      "offset": [
+        -1288.8550313907574,
+        -470.52746917543794
+      ]
+    },
+    "frontendVersion": "1.42.11",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
