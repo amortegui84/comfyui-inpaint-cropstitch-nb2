@@ -8,9 +8,7 @@ Fork of [ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpa
 
 ## Demo
 
-<video src="assets/demo.mp4" controls title="ComfyUI-Inpaint-CropStitch-NB2 demo">
-  <a href="assets/demo.mp4">Demo video</a>
-</video>
+[![Demo video](https://img.youtube.com/vi/aqXyEMK6grk/maxresdefault.jpg)](https://www.youtube.com/watch?v=aqXyEMK6grk)
 
 ## Why these nodes exist
 
