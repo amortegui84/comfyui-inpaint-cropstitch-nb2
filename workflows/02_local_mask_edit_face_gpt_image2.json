@@ -140,6 +140,11 @@
           "name": "mask",
           "type": "MASK",
           "link": 2
+        },
+        {
+          "name": "region_info",
+          "type": "STRING",
+          "link": 12
         }
       ],
       "outputs": [
@@ -187,6 +192,9 @@
       },
       "widgets_values": [
         1.15,
+        true,
+        0,
+        0,
         "resize_to_target",
         1024,
         1024,

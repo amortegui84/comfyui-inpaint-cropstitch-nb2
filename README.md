@@ -205,6 +205,9 @@ Local masked-edit crop for models that accept a real mask (e.g. GPT Image). Use 
 | image | IMAGE | Source image |
 | mask | MASK | Local semantic mask |
 | context_expand | FLOAT | Grows the detected region before cropping |
+| use_region_guidance | BOOLEAN | Reuse Florence region metadata for context and target-size defaults |
+| mask_expand_percent | FLOAT | Extra expansion applied to the edit mask after crop |
+| mask_feather_percent | FLOAT | Softens the edit mask edges before sending to the editor |
 | resize_mode | choice | `keep_local_size` or `resize_to_target` |
 | target_width | INT | Used when `resize_to_target` |
 | target_height | INT | Used when `resize_to_target` |
@@ -212,6 +215,7 @@ Local masked-edit crop for models that accept a real mask (e.g. GPT Image). Use 
 | upscale_algorithm | choice | Resize-up algorithm |
 | device_mode | choice | CPU or GPU |
 | depad_florence | BOOLEAN | Remove Florence2 letterbox padding (default `True`) |
+| region_info | STRING | Optional Florence `info` output for shared aspect, mask, and sizing hints |
 
 Outputs: `stitcher`, `cropped_image`, `cropped_mask`, `cropped_mask_image`, `preview_image`, `info`
 

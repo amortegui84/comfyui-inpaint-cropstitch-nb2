@@ -89,6 +89,44 @@ REGION_ASPECT_RATIO_HINTS = {
     "full_body": "9:16",
 }
 
+REGION_EDIT_HINTS = {
+    "glasses": {
+        "aspect_ratio": "16:9",
+        "edit_size": "1920x1080",
+        "mask_expand_percent": 18.0,
+        "mask_feather_percent": 10.0,
+        "context_expand": 1.18,
+    },
+    "face": {
+        "aspect_ratio": "1:1",
+        "edit_size": "1024x1024",
+        "mask_expand_percent": 10.0,
+        "mask_feather_percent": 6.0,
+        "context_expand": 1.12,
+    },
+    "upper_body": {
+        "aspect_ratio": "1:1",
+        "edit_size": "1024x1024",
+        "mask_expand_percent": 8.0,
+        "mask_feather_percent": 5.0,
+        "context_expand": 1.10,
+    },
+    "lower_body": {
+        "aspect_ratio": "1:1",
+        "edit_size": "1024x1024",
+        "mask_expand_percent": 8.0,
+        "mask_feather_percent": 5.0,
+        "context_expand": 1.10,
+    },
+    "full_body": {
+        "aspect_ratio": "9:16",
+        "edit_size": "1024x1536",
+        "mask_expand_percent": 6.0,
+        "mask_feather_percent": 4.0,
+        "context_expand": 1.08,
+    },
+}
+
 EDIT_SIZE_BY_ASPECT_RATIO = {
     "16:9": "1920x1080",
     "9:16": "1024x1536",
@@ -143,6 +181,21 @@ def _recommend_edit_size_for_aspect_ratio(aspect_ratio):
     return EDIT_SIZE_BY_ASPECT_RATIO.get(aspect_ratio, "1024x1024")
 
 
+def _get_region_edit_hints(region_type):
+    region_type = _coerce_text_value(region_type)
+    hints = REGION_EDIT_HINTS.get(region_type)
+    if hints:
+        return dict(hints)
+    aspect_ratio = _recommend_aspect_ratio_for_region(region_type)
+    return {
+        "aspect_ratio": aspect_ratio,
+        "edit_size": _recommend_edit_size_for_aspect_ratio(aspect_ratio),
+        "mask_expand_percent": 8.0,
+        "mask_feather_percent": 5.0,
+        "context_expand": 1.10,
+    }
+
+
 def _extract_region_context(region_info):
     data = _safe_json_loads(region_info)
     bbox_obj = data.get("bbox") if isinstance(data, dict) else None
@@ -172,6 +225,9 @@ def _extract_region_context(region_info):
         "bbox": bbox,
         "recommended_aspect_ratio": recommended_aspect_ratio,
         "recommended_edit_size": recommended_edit_size,
+        "recommended_mask_expand_percent": float(data.get("recommended_mask_expand_percent", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
+        "recommended_mask_feather_percent": float(data.get("recommended_mask_feather_percent", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
+        "recommended_context_expand": float(data.get("recommended_context_expand", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
     }
 
 
@@ -1079,6 +1135,39 @@ def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
         )
 
     return mask, image, (" | ".join(note_parts) if note_parts else "mask already matched image")
+
+
+def _grow_and_feather_mask(mask_2d: torch.Tensor,
+                           expand_percent: float,
+                           feather_percent: float) -> torch.Tensor:
+    mask_np = mask_2d.detach().cpu().numpy().astype(np.float32)
+    binary = mask_np > 0.001
+    ys, xs = np.nonzero(binary)
+    if len(xs) == 0 or len(ys) == 0:
+        return mask_2d.clamp(0, 1)
+
+    box_w = max(1, int(xs.max() - xs.min() + 1))
+    box_h = max(1, int(ys.max() - ys.min() + 1))
+    grow_px = int(round(max(box_w, box_h) * (max(0.0, expand_percent) / 100.0)))
+    if grow_px > 0:
+        kernel = np.ones((grow_px * 2 + 1, grow_px * 2 + 1), dtype=np.uint8)
+        binary = grey_dilation(binary.astype(np.float32), footprint=kernel, mode="reflect") > 0.0
+
+    mask_float = binary.astype(np.float32)
+    feather_px = max(0.0, max(box_w, box_h) * (max(0.0, feather_percent) / 100.0))
+    if feather_px > 0.0:
+        blurred = gaussian_filter(mask_float, sigma=max(0.5, feather_px / 3.0), mode="reflect")
+        if blurred.max() > 0:
+            mask_float = blurred / blurred.max()
+    return torch.from_numpy(mask_float).to(mask_2d.device, dtype=torch.float32).clamp(0, 1)
+
+
+def _parse_edit_size(size_value: str) -> tuple[int, int]:
+    size_value = _coerce_text_value(size_value)
+    match = re.fullmatch(r"(\d+)x(\d+)", size_value)
+    if not match:
+        raise ValueError(f"Unsupported edit size value: {size_value}")
+    return int(match.group(1)), int(match.group(2))
 # ===========================================================================
 #  NEW NODE 1 — NanoBanana2MaskGen
 # ===========================================================================
@@ -1344,6 +1433,18 @@ class SmartMaskCrop:
                 "context_expand": ("FLOAT", {
                     "default": 1.15, "min": 1.0, "max": 4.0, "step": 0.01,
                     "tooltip": "Grow the detected mask region before cropping."}),
+                "use_region_guidance": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Use Florence region metadata to override context and target size when available.",
+                }),
+                "mask_expand_percent": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5,
+                    "tooltip": "Extra expansion applied to the edit mask after crop. 0 uses region defaults when guidance is enabled.",
+                }),
+                "mask_feather_percent": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5,
+                    "tooltip": "Softens the edit mask edges after crop. 0 uses region defaults when guidance is enabled.",
+                }),
                 "resize_mode": (["keep_local_size", "resize_to_target"], {
                     "default": "resize_to_target"}),
                 "target_width": ("INT", {
@@ -1364,6 +1465,9 @@ class SmartMaskCrop:
                         "Florence2Run (kijai). Disable only if your mask is already "
                         "at the exact source image resolution."
                     )}),
+            },
+            "optional": {
+                "region_info": ("STRING",),
             }
         }
 
@@ -1376,9 +1480,10 @@ class SmartMaskCrop:
         "mask-based editing models such as GPT Image."
     )
 
-    def smart_mask_crop(self, image, mask, context_expand, resize_mode,
+    def smart_mask_crop(self, image, mask, context_expand, use_region_guidance,
+                        mask_expand_percent, mask_feather_percent, resize_mode,
                         target_width, target_height, downscale_algorithm,
-                        upscale_algorithm, device_mode, depad_florence=True):
+                        upscale_algorithm, device_mode, depad_florence=True, region_info=""):
         image = image.clone()
         mask = mask.clone()
         if device_mode == "gpu (much faster)":
@@ -1393,6 +1498,22 @@ class SmartMaskCrop:
             mask, image, processor, "SmartMaskCrop",
             depad_florence=depad_florence
         )
+        region_context = _extract_region_context(region_info)
+        context_expand_effective = float(context_expand)
+        target_width_effective = int(target_width)
+        target_height_effective = int(target_height)
+        mask_expand_effective = float(mask_expand_percent)
+        mask_feather_effective = float(mask_feather_percent)
+
+        if use_region_guidance:
+            if region_context.get("recommended_context_expand", 0.0) > 0.0:
+                context_expand_effective = max(context_expand_effective, float(region_context["recommended_context_expand"]))
+            if resize_mode == "resize_to_target" and region_context.get("recommended_edit_size"):
+                target_width_effective, target_height_effective = _parse_edit_size(region_context["recommended_edit_size"])
+            if mask_expand_effective <= 0.0 and region_context.get("recommended_mask_expand_percent", 0.0) > 0.0:
+                mask_expand_effective = float(region_context["recommended_mask_expand_percent"])
+            if mask_feather_effective <= 0.0 and region_context.get("recommended_mask_feather_percent", 0.0) > 0.0:
+                mask_feather_effective = float(region_context["recommended_mask_feather_percent"])
 
         result_stitcher = {
             'downscale_algorithm': downscale_algorithm,
@@ -1425,9 +1546,9 @@ class SmartMaskCrop:
             if bx[0] == -1:
                 raise ValueError("mask is empty; Smart Mask Crop requires a non-empty mask.")
 
-            if context_expand > 1.0:
+            if context_expand_effective > 1.0:
                 _, bx, by, bw, bh = processor.batched_growcontextarea_m(
-                    sub_mask, bx, by, bw, bh, context_expand
+                    sub_mask, bx, by, bw, bh, context_expand_effective
                 )
 
             cur_x = bx[0].item()
@@ -1440,8 +1561,8 @@ class SmartMaskCrop:
                 out_h = max(1, int(cur_h))
                 resize_output = False
             else:
-                out_w = int(target_width)
-                out_h = int(target_height)
+                out_w = int(target_width_effective)
+                out_h = int(target_height_effective)
                 resize_output = True
 
             (canvas_image, cto_x, cto_y, cto_w, cto_h,
@@ -1463,11 +1584,16 @@ class SmartMaskCrop:
             result_stitcher['cropped_to_canvas_y'].append(ctc_y)
             result_stitcher['cropped_to_canvas_w'].append(ctc_w)
             result_stitcher['cropped_to_canvas_h'].append(ctc_h)
-            result_stitcher['cropped_mask_for_blend'].append(cropped_mask.cpu())
+            edit_mask = _grow_and_feather_mask(
+                cropped_mask.squeeze(0),
+                mask_expand_effective,
+                mask_feather_effective,
+            ).unsqueeze(0)
+            result_stitcher['cropped_mask_for_blend'].append(edit_mask.cpu())
 
             result_image.append(cropped_image.squeeze(0).cpu())
-            result_mask.append(cropped_mask.squeeze(0).cpu())
-            mask_rgb = torch.stack([cropped_mask.squeeze(0).cpu()] * 3, dim=-1)
+            result_mask.append(edit_mask.squeeze(0).cpu())
+            mask_rgb = torch.stack([edit_mask.squeeze(0).cpu()] * 3, dim=-1)
             result_mask_image.append(mask_rgb)
 
             preview_tensor, temp_info = _make_nb2_preview(sub_image[0].cpu(), cur_y, cur_x, cur_h, cur_w)
@@ -1476,10 +1602,13 @@ class SmartMaskCrop:
                 preview_ui.append(temp_info)
 
             infos.append({
-                "context_expand": context_expand,
+                "context_expand": context_expand_effective,
+                "use_region_guidance": bool(use_region_guidance),
                 "resize_mode": resize_mode,
                 "target_width": int(out_w),
                 "target_height": int(out_h),
+                "mask_expand_percent": float(mask_expand_effective),
+                "mask_feather_percent": float(mask_feather_effective),
                 "mask_bbox_x": int(cur_x),
                 "mask_bbox_y": int(cur_y),
                 "mask_bbox_w": int(cur_w),
@@ -2601,7 +2730,8 @@ class NB2Florence2RegionSelector:
             crop_height = int(padded_bbox[3] - padded_bbox[1])
 
             mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
-            recommended_aspect_ratio = _recommend_aspect_ratio_for_region(region_type, padded_bbox)
+            region_edit_hints = _get_region_edit_hints(region_type)
+            recommended_aspect_ratio = region_edit_hints["aspect_ratio"] or _recommend_aspect_ratio_for_region(region_type, padded_bbox)
             info = {
                 "region_type": region_type,
                 "query": query,
@@ -2610,7 +2740,10 @@ class NB2Florence2RegionSelector:
                 "padding_percent": padding_percent,
                 "api_key_source": api_key_source,
                 "recommended_aspect_ratio": recommended_aspect_ratio,
-                "recommended_edit_size": _recommend_edit_size_for_aspect_ratio(recommended_aspect_ratio),
+                "recommended_edit_size": region_edit_hints["edit_size"],
+                "recommended_mask_expand_percent": float(region_edit_hints["mask_expand_percent"]),
+                "recommended_mask_feather_percent": float(region_edit_hints["mask_feather_percent"]),
+                "recommended_context_expand": float(region_edit_hints["context_expand"]),
                 "original_size": {"width": int(original_size[0]), "height": int(original_size[1])},
                 "uploaded_size": {"width": int(uploaded_size[0]), "height": int(uploaded_size[1])},
                 "bbox": {
