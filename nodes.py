@@ -93,35 +93,35 @@ REGION_ASPECT_RATIO_HINTS = {
 REGION_EDIT_HINTS = {
     "glasses": {
         "aspect_ratio": "16:9",
-        "edit_size": "1920x1080",
+        "edit_size": "2752x1536",
         "mask_expand_percent": 18.0,
         "mask_feather_percent": 10.0,
         "context_expand": 1.18,
     },
     "face": {
         "aspect_ratio": "1:1",
-        "edit_size": "1024x1024",
+        "edit_size": "2048x2048",
         "mask_expand_percent": 10.0,
         "mask_feather_percent": 6.0,
         "context_expand": 1.12,
     },
     "upper_body": {
         "aspect_ratio": "1:1",
-        "edit_size": "1024x1024",
+        "edit_size": "2048x2048",
         "mask_expand_percent": 8.0,
         "mask_feather_percent": 5.0,
         "context_expand": 1.10,
     },
     "lower_body": {
         "aspect_ratio": "1:1",
-        "edit_size": "1024x1024",
+        "edit_size": "2048x2048",
         "mask_expand_percent": 8.0,
         "mask_feather_percent": 5.0,
         "context_expand": 1.10,
     },
     "full_body": {
         "aspect_ratio": "9:16",
-        "edit_size": "1024x1536",
+        "edit_size": "1536x2752",
         "mask_expand_percent": 6.0,
         "mask_feather_percent": 4.0,
         "context_expand": 1.08,
@@ -129,9 +129,9 @@ REGION_EDIT_HINTS = {
 }
 
 EDIT_SIZE_BY_ASPECT_RATIO = {
-    "16:9": "1920x1080",
-    "9:16": "1024x1536",
-    "1:1": "1024x1024",
+    "16:9": "2752x1536",
+    "9:16": "1536x2752",
+    "1:1": "2048x2048",
 }
 
 
