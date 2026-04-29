@@ -56,7 +56,7 @@ External Florence-2 region selector integrated into this repo. It calls FAL's Fl
 | Input | Type | Description |
 |---|---|---|
 | image | IMAGE | Source image |
-| region_type | choice | `face`, `upper_body`, `lower_body`, `full_body`, `object` |
+| region_type | choice | `glasses`, `face`, `upper_body`, `lower_body`, `full_body`, `object` |
 | custom_text | STRING | Required only when `region_type = object` |
 | selection_mode | choice | `largest` or `merge_all` |
 | padding_percent | FLOAT | Expands the detected region bbox for downstream crop sizing |
@@ -65,6 +65,8 @@ External Florence-2 region selector integrated into this repo. It calls FAL's Fl
 | api_key_env_var | STRING | Env var name fallback, default `FAL_KEY` |
 
 Outputs: `mask`, `mask_image`, `info`, `center_x`, `center_y`, `crop_width`, `crop_height`
+
+Built-in region defaults: `glasses -> 16:9`, `face -> 1:1`, `upper_body -> 1:1`, `lower_body -> 1:1`, `full_body -> 9:16`. These hints are stored in the `info` output and can drive downstream auto sizing.
 
 Security notes:
 
@@ -87,7 +89,7 @@ Interactive node that generates a rectangular mask at an exact position on the o
 | Input | Type | Description |
 |---|---|---|
 | image | IMAGE | Source image used for dimensions and preview |
-| aspect_ratio | choice | `16:9`, `9:16`, `1:1` |
+| aspect_ratio | choice | `auto`, `16:9`, `9:16`, `1:1` |
 | resolution | choice | `1K`, `2K`, `4K` |
 | center_x | INT | Horizontal center of the crop rectangle |
 | center_y | INT | Vertical center of the crop rectangle |
@@ -105,7 +107,7 @@ Automatic NB2 rectangle fitting from a semantic mask. Use this when you already 
 |---|---|---|
 | image | IMAGE | Source image |
 | region_mask | MASK | Semantic mask to fit |
-| aspect_ratio | choice | `16:9`, `9:16`, `1:1` |
+| aspect_ratio | choice | `auto`, `16:9`, `9:16`, `1:1` |
 | resolution | choice | `1K`, `2K`, `4K` |
 | padding_percent | FLOAT | Expands the detected region before rectangle fitting |
 | crop_scale | FLOAT | Additional scale multiplier after fitting |
@@ -113,11 +115,43 @@ Automatic NB2 rectangle fitting from a semantic mask. Use this when you already 
 
 Outputs: `mask`, `nb2_width`, `nb2_height`, `preview_image`, `center_x`, `center_y`, `crop_width`, `crop_height`, `info`
 
+When `aspect_ratio = auto`, the node resolves the crop shape from Florence region metadata first, then falls back to the mask bbox if no region hint is available.
+
 > **depad_florence** — Florence2 pads images to a square internally before processing. Without this correction the detected bbox shifts sideways or vertically on non-square images. Leave `True` when the mask comes from `Florence2Run (kijai)`. Set to `False` only if your mask is already at the exact source image resolution (e.g. from a hand-drawn mask or SAM).
 
 Typical flow:
 ```
 NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> NB2 Smart Region -> NB2 Crop -> Nano Banana 2 -> NB2 Stitch
+```
+
+---
+
+### OpenAI GPT Image Edit
+
+External OpenAI image editor integrated into this repo. It calls `POST /v1/images/edits`, accepts an optional mask, and can auto-pick portrait, square, or landscape output sizes from Florence region metadata.
+
+| Input | Type | Description |
+|---|---|---|
+| image_1 | IMAGE | Base image to edit |
+| prompt | STRING | Edit instruction |
+| model | choice | `gpt-image-2`, `chatgpt-image-latest`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini` |
+| quality | choice | `auto`, `low`, `medium`, `high` |
+| size_mode | choice | `auto_from_region` or `manual` |
+| size | choice | `auto`, `1024x1024`, `1024x1536`, `1536x1024` |
+| background | choice | `auto`, `opaque`, `transparent` |
+| output_format | choice | `png`, `webp`, `jpeg` |
+| output_compression | INT | Used for `webp` and `jpeg` outputs |
+| moderation | choice | `auto` or `low` |
+| api_key | STRING | Optional direct API key input |
+| api_key_env_var | STRING | Env var fallback, default `OPENAI_API_KEY` |
+| mask_image | IMAGE | Optional mask image. If connected, the node converts it to an alpha mask automatically |
+| region_info | STRING | Optional Florence `info` output used for automatic size selection |
+
+Outputs: `images`, `info`
+
+Typical flow:
+```
+NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -> Smart Mask Stitch
 ```
 
 ---
@@ -282,13 +316,21 @@ Restart ComfyUI after updating.
 
 ### Python dependencies
 
-This repo now includes an external Florence-2 node that needs `fal-client` in the same Python environment ComfyUI uses.
+This repo now includes external Florence-2 and OpenAI image-edit nodes. They need `fal-client` plus the normal HTTP/image dependencies in the same Python environment ComfyUI uses.
 
 ```bash
 python -m pip install fal-client requests pillow numpy
 ```
 
 Restart ComfyUI after installing dependencies.
+
+### Git LFS note
+
+This repo tracks `assets/demo.mp4` with Git LFS. The nodes and workflows still work without that demo file, but if you want the full asset after `git clone` or `git pull`, install Git LFS once on the machine:
+
+```bash
+git lfs install
+```
 
 ### Optional dependency — Florence2
 

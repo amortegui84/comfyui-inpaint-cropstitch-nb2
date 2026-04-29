@@ -31,6 +31,7 @@ Intended workflow
        | result image
 """
 
+import base64
 import comfy.utils
 import comfy.model_management
 import io
@@ -40,6 +41,7 @@ import math
 import nodes
 import numpy as np
 import os
+import requests
 import uuid
 import torch
 import torch.nn.functional as TF
@@ -79,6 +81,100 @@ NB2_RESOLUTIONS = {
         "4K": (4096, 4096),
     },
 }
+
+REGION_ASPECT_RATIO_HINTS = {
+    "glasses": "16:9",
+    "face": "1:1",
+    "upper_body": "1:1",
+    "lower_body": "1:1",
+    "full_body": "9:16",
+}
+
+EDIT_SIZE_BY_ASPECT_RATIO = {
+    "16:9": "1536x1024",
+    "9:16": "1024x1536",
+    "1:1": "1024x1024",
+}
+
+
+def _coerce_text_value(value):
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _safe_json_loads(value):
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    value = value.strip()
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
+
+
+def _aspect_ratio_from_bbox_dims(width, height):
+    width = max(1.0, float(width))
+    height = max(1.0, float(height))
+    ratio = width / height
+    if ratio >= 1.2:
+        return "16:9"
+    if ratio <= (1.0 / 1.2):
+        return "9:16"
+    return "1:1"
+
+
+def _recommend_aspect_ratio_for_region(region_type, bbox=None):
+    region_type = _coerce_text_value(region_type)
+    if region_type in REGION_ASPECT_RATIO_HINTS:
+        return REGION_ASPECT_RATIO_HINTS[region_type]
+    if bbox:
+        x1, y1, x2, y2 = bbox
+        return _aspect_ratio_from_bbox_dims(max(1, x2 - x1), max(1, y2 - y1))
+    return "1:1"
+
+
+def _recommend_edit_size_for_aspect_ratio(aspect_ratio):
+    return EDIT_SIZE_BY_ASPECT_RATIO.get(aspect_ratio, "1024x1024")
+
+
+def _extract_region_context(region_info):
+    data = _safe_json_loads(region_info)
+    bbox_obj = data.get("bbox") if isinstance(data, dict) else None
+    bbox = None
+    if isinstance(bbox_obj, dict):
+        try:
+            bbox = (
+                int(bbox_obj["x1"]),
+                int(bbox_obj["y1"]),
+                int(bbox_obj["x2"]),
+                int(bbox_obj["y2"]),
+            )
+        except Exception:
+            bbox = None
+    elif all(key in data for key in ("x1", "y1", "x2", "y2")):
+        try:
+            bbox = (int(data["x1"]), int(data["y1"]), int(data["x2"]), int(data["y2"]))
+        except Exception:
+            bbox = None
+
+    region_type = _coerce_text_value(data.get("region_type")) if isinstance(data, dict) else ""
+    recommended_aspect_ratio = _coerce_text_value(data.get("recommended_aspect_ratio")) if isinstance(data, dict) else ""
+    recommended_edit_size = _coerce_text_value(data.get("recommended_edit_size")) if isinstance(data, dict) else ""
+
+    return {
+        "region_type": region_type,
+        "bbox": bbox,
+        "recommended_aspect_ratio": recommended_aspect_ratio,
+        "recommended_edit_size": recommended_edit_size,
+    }
+
 
 
 # ---------------------------------------------------------------------------
@@ -1090,7 +1186,7 @@ class NB2SmartRegionMask:
             "required": {
                 "image": ("IMAGE",),
                 "region_mask": ("MASK",),
-                "aspect_ratio": (["16:9", "9:16", "1:1"], {"default": "16:9"}),
+                "aspect_ratio": (["auto", "16:9", "9:16", "1:1"], {"default": "auto"}),
                 "resolution":   (["1K", "2K", "4K"], {"default": "2K"}),
                 "padding_percent": ("FLOAT", {
                     "default": 8.0, "min": 0.0, "max": 100.0, "step": 0.5,
@@ -1106,6 +1202,9 @@ class NB2SmartRegionMask:
                         "Florence2Run (kijai). Disable only if your mask is already "
                         "at the exact source image resolution."
                     )}),
+            },
+            "optional": {
+                "region_info": ("STRING",),
             }
         }
 
@@ -1130,7 +1229,7 @@ class NB2SmartRegionMask:
     )
 
     def generate_from_region(self, image, region_mask, aspect_ratio, resolution,
-                             padding_percent, crop_scale, depad_florence=True):
+                             padding_percent, crop_scale, depad_florence=True, region_info=""):
         image = image.clone()
         region_mask = region_mask.clone()
         processor = CPUProcessorLogic()
@@ -1140,7 +1239,24 @@ class NB2SmartRegionMask:
         )
 
         B, H, W, _ = image.shape
-        nb2_w, nb2_h = NB2_RESOLUTIONS[aspect_ratio][resolution]
+        region_context = _extract_region_context(region_info)
+        resolved_aspect_ratio = aspect_ratio
+        aspect_ratio_source = "manual"
+        if aspect_ratio == "auto":
+            resolved_aspect_ratio = region_context.get("recommended_aspect_ratio") or _recommend_aspect_ratio_for_region(
+                region_context.get("region_type"),
+                region_context.get("bbox"),
+            )
+            if not resolved_aspect_ratio or resolved_aspect_ratio == "1:1":
+                ys, xs = torch.nonzero(region_mask[0] > 0, as_tuple=True)
+                if len(xs) > 0 and len(ys) > 0:
+                    bbox_w = int(xs.max().item() - xs.min().item() + 1)
+                    bbox_h = int(ys.max().item() - ys.min().item() + 1)
+                    resolved_aspect_ratio = _aspect_ratio_from_bbox_dims(bbox_w, bbox_h)
+                    aspect_ratio_source = "mask_bbox"
+            if aspect_ratio_source == "manual":
+                aspect_ratio_source = "region_info" if region_context.get("region_type") or region_context.get("recommended_aspect_ratio") else "default"
+        nb2_w, nb2_h = NB2_RESOLUTIONS[resolved_aspect_ratio][resolution]
         target_ar = nb2_w / nb2_h
 
         mask_out = torch.zeros(B, H, W, dtype=torch.float32)
@@ -1173,7 +1289,9 @@ class NB2SmartRegionMask:
                 preview_ui.append(temp_info)
 
             infos.append({
-                "aspect_ratio": aspect_ratio,
+                "requested_aspect_ratio": aspect_ratio,
+                "resolved_aspect_ratio": resolved_aspect_ratio,
+                "aspect_ratio_source": aspect_ratio_source,
                 "resolution": resolution,
                 "padding_percent": padding_percent,
                 "crop_scale": crop_scale,
@@ -1920,9 +2038,10 @@ class NB2Florence2RegionSelector:
       such as FAL_KEY.
     """
 
-    REGION_TYPE_OPTIONS = ["face", "upper_body", "lower_body", "full_body", "object"]
+    REGION_TYPE_OPTIONS = ["glasses", "face", "upper_body", "lower_body", "full_body", "object"]
     SELECTION_MODE_OPTIONS = ["largest", "merge_all"]
     REGION_QUERY_MAP = {
+        "glasses": "eyeglasses",
         "face": "face",
         "upper_body": "upper body",
         "lower_body": "lower body",
@@ -1995,20 +2114,42 @@ class NB2Florence2RegionSelector:
         "API key can be provided by input or environment variable."
     )
 
+    def _coerce_text(self, value):
+        if value is None or isinstance(value, bool):
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
     def _looks_like_api_key(self, value):
-        candidate = (value or "").strip()
+        candidate = self._coerce_text(value)
         if not candidate:
             return False
         if len(candidate) < 24:
             return False
         return ":" in candidate or candidate.startswith("fal_")
 
-    def _resolve_api_key(self, api_key, api_key_env_var):
-        direct_key = (api_key or "").strip()
-        if direct_key:
-            return direct_key
+    def _looks_like_env_var_name(self, value):
+        candidate = self._coerce_text(value)
+        if not candidate:
+            return False
+        if ":" in candidate or any(ch.isspace() for ch in candidate):
+            return False
+        return candidate.replace("_", "a").isalnum()
 
-        env_name = (api_key_env_var or "FAL_KEY").strip() or "FAL_KEY"
+    def _resolve_api_key(self, api_key, api_key_env_var):
+        direct_key = self._coerce_text(api_key)
+        if direct_key:
+            if self._looks_like_env_var_name(direct_key) and not self._looks_like_api_key(direct_key):
+                env_key = os.getenv(direct_key, "").strip()
+                if env_key:
+                    logger.warning(
+                        "Florence node received an environment variable name in api_key; resolving it from the environment."
+                    )
+                    return env_key, f"environment:{direct_key}"
+            return direct_key, "direct_input"
+
+        env_name = self._coerce_text(api_key_env_var) or "FAL_KEY"
 
         # If the key was pasted into the env-var field by mistake, treat it as
         # the key directly instead of leaking it back in an error message.
@@ -2016,14 +2157,21 @@ class NB2Florence2RegionSelector:
             logger.warning(
                 "Florence node received an API key in api_key_env_var; using it as a direct key."
             )
-            return env_name
+            return env_name, "api_key_env_var_direct_input"
+
+        if not self._looks_like_env_var_name(env_name):
+            logger.warning(
+                "Florence node received an invalid api_key_env_var value %r; falling back to FAL_KEY.",
+                api_key_env_var,
+            )
+            env_name = "FAL_KEY"
 
         env_key = os.getenv(env_name, "").strip()
         if env_key:
-            return env_key
+            return env_key, f"environment:{env_name}"
 
         raise ValueError(
-            "Missing FAL API key. Paste it into api_key or set the configured environment variable."
+            f"Missing FAL API key. Paste it into api_key or set the environment variable {env_name}."
         )
 
     def _get_fal_client(self):
@@ -2391,7 +2539,7 @@ class NB2Florence2RegionSelector:
                     "NB2Florence2RegionSelector currently supports batch size 1 only."
                 )
 
-            resolved_api_key = self._resolve_api_key(api_key, api_key_env_var)
+            resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
             query = self._build_query(region_type, custom_text)
             image_url, original_size, uploaded_size = self._upload_image(
                 image,
@@ -2454,13 +2602,16 @@ class NB2Florence2RegionSelector:
             crop_height = int(padded_bbox[3] - padded_bbox[1])
 
             mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
+            recommended_aspect_ratio = _recommend_aspect_ratio_for_region(region_type, padded_bbox)
             info = {
                 "region_type": region_type,
                 "query": query,
                 "source": source,
                 "selection_mode": selection_mode,
                 "padding_percent": padding_percent,
-                "api_key_source": "direct_input" if (api_key or "").strip() else "environment",
+                "api_key_source": api_key_source,
+                "recommended_aspect_ratio": recommended_aspect_ratio,
+                "recommended_edit_size": _recommend_edit_size_for_aspect_ratio(recommended_aspect_ratio),
                 "original_size": {"width": int(original_size[0]), "height": int(original_size[1])},
                 "uploaded_size": {"width": int(uploaded_size[0]), "height": int(uploaded_size[1])},
                 "bbox": {
@@ -2489,6 +2640,306 @@ class NB2Florence2RegionSelector:
             raise RuntimeError(f"Florence region selection failed: {str(e)}") from e
 
 
+class NB2OpenAIImageEdit:
+    """
+    Edit an image with OpenAI's external Images API using an optional mask.
+    """
+
+    MODEL_OPTIONS = [
+        "gpt-image-2",
+        "chatgpt-image-latest",
+        "gpt-image-1.5",
+        "gpt-image-1",
+        "gpt-image-1-mini",
+    ]
+    QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
+    SIZE_MODE_OPTIONS = ["auto_from_region", "manual"]
+    SIZE_OPTIONS = ["auto", "1024x1024", "1024x1536", "1536x1024"]
+    BACKGROUND_OPTIONS = ["auto", "opaque", "transparent"]
+    FORMAT_OPTIONS = ["png", "webp", "jpeg"]
+    MODERATION_OPTIONS = ["auto", "low"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_1": ("IMAGE",),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "Retouch only the masked region. Preserve the rest of the image.",
+                }),
+                "model": (cls.MODEL_OPTIONS, {"default": "gpt-image-2"}),
+                "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
+                "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_region"}),
+                "size": (cls.SIZE_OPTIONS, {"default": "auto"}),
+                "background": (cls.BACKGROUND_OPTIONS, {"default": "auto"}),
+                "output_format": (cls.FORMAT_OPTIONS, {"default": "png"}),
+                "output_compression": ("INT", {"default": 90, "min": 0, "max": 100, "step": 1}),
+                "moderation": (cls.MODERATION_OPTIONS, {"default": "auto"}),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "Optional. Leave blank to use OPENAI_API_KEY",
+                }),
+                "api_key_env_var": ("STRING", {
+                    "multiline": False,
+                    "default": "OPENAI_API_KEY",
+                    "placeholder": "Environment variable fallback",
+                }),
+            },
+            "optional": {
+                "mask_image": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "region_info": ("STRING",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "info")
+    FUNCTION = "edit_image"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Edits an image through OpenAI's external Images API. "
+        "Supports optional masks and region-aware automatic output sizing."
+    )
+
+    def _looks_like_api_key(self, value):
+        candidate = _coerce_text_value(value)
+        if not candidate:
+            return False
+        if len(candidate) < 20:
+            return False
+        return candidate.startswith("sk-") or candidate.startswith("org-") or candidate.startswith("proj_")
+
+    def _looks_like_env_var_name(self, value):
+        candidate = _coerce_text_value(value)
+        if not candidate:
+            return False
+        if any(ch.isspace() for ch in candidate) or ":" in candidate:
+            return False
+        return candidate.replace("_", "a").isalnum()
+
+    def _resolve_api_key(self, api_key, api_key_env_var):
+        direct_key = _coerce_text_value(api_key)
+        if direct_key:
+            if self._looks_like_env_var_name(direct_key) and not self._looks_like_api_key(direct_key):
+                env_key = os.getenv(direct_key, "").strip()
+                if env_key:
+                    logger.warning(
+                        "OpenAI image node received an environment variable name in api_key; resolving it from the environment."
+                    )
+                    return env_key, f"environment:{direct_key}"
+            return direct_key, "direct_input"
+
+        env_name = _coerce_text_value(api_key_env_var) or "OPENAI_API_KEY"
+        if self._looks_like_api_key(env_name):
+            logger.warning(
+                "OpenAI image node received an API key in api_key_env_var; using it as a direct key."
+            )
+            return env_name, "api_key_env_var_direct_input"
+
+        if not self._looks_like_env_var_name(env_name):
+            logger.warning(
+                "OpenAI image node received an invalid api_key_env_var value %r; falling back to OPENAI_API_KEY.",
+                api_key_env_var,
+            )
+            env_name = "OPENAI_API_KEY"
+
+        env_key = os.getenv(env_name, "").strip()
+        if env_key:
+            return env_key, f"environment:{env_name}"
+
+        raise ValueError(
+            f"Missing OpenAI API key. Paste it into api_key or set the environment variable {env_name}."
+        )
+
+    def _normalize_image_array(self, image):
+        if isinstance(image, torch.Tensor):
+            image_np = image.detach().cpu().numpy()
+        else:
+            image_np = np.asarray(image)
+
+        if image_np.ndim == 4 and image_np.shape[0] == 1:
+            image_np = image_np[0]
+        elif image_np.ndim == 3 and image_np.shape[0] in (3, 4):
+            image_np = np.transpose(image_np, (1, 2, 0))
+
+        if image_np.dtype != np.uint8:
+            if image_np.max() <= 1.0:
+                image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+            else:
+                image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+
+        if image_np.ndim == 2:
+            image_np = np.stack([image_np] * 3, axis=-1)
+
+        if image_np.shape[-1] == 1:
+            image_np = np.repeat(image_np, 3, axis=-1)
+
+        return image_np
+
+    def _image_tensor_to_png_bytes(self, image_tensor):
+        image_np = self._normalize_image_array(image_tensor)
+        mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
+        image = Image.fromarray(image_np[..., :4] if mode == "RGBA" else image_np[..., :3], mode=mode)
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue(), image.size
+
+    def _mask_tensor_to_png_bytes(self, mask_image, target_size):
+        mask_np = self._normalize_image_array(mask_image)
+        if mask_np.shape[-1] >= 3:
+            mask_gray = np.max(mask_np[..., :3], axis=-1).astype(np.uint8)
+        else:
+            mask_gray = mask_np[..., 0].astype(np.uint8)
+        mask = Image.fromarray(mask_gray, mode="L")
+        if mask.size != target_size:
+            mask = mask.resize(target_size, Image.NEAREST)
+        mask_rgba = mask.convert("RGBA")
+        mask_rgba.putalpha(mask)
+        buf = io.BytesIO()
+        mask_rgba.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _mask_bbox(self, mask_image):
+        mask_np = self._normalize_image_array(mask_image)
+        if mask_np.shape[-1] >= 3:
+            mask_gray = np.max(mask_np[..., :3], axis=-1)
+        else:
+            mask_gray = mask_np[..., 0]
+        ys, xs = np.nonzero(mask_gray > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+
+    def _resolve_size(self, size_mode, size, region_info, mask_image):
+        if size_mode != "auto_from_region":
+            return size, "manual"
+
+        region_context = _extract_region_context(region_info)
+        if region_context.get("recommended_edit_size"):
+            return region_context["recommended_edit_size"], "region_info"
+
+        bbox = region_context.get("bbox")
+        region_type = region_context.get("region_type")
+        if bbox or region_type:
+            aspect_ratio = _recommend_aspect_ratio_for_region(region_type, bbox)
+            return _recommend_edit_size_for_aspect_ratio(aspect_ratio), "region_info"
+
+        if mask_image is not None:
+            mask_bbox = self._mask_bbox(mask_image)
+            if mask_bbox:
+                aspect_ratio = _recommend_aspect_ratio_for_region("", mask_bbox)
+                return _recommend_edit_size_for_aspect_ratio(aspect_ratio), "mask_bbox"
+
+        return size, "manual_fallback"
+
+    def _decode_image_result(self, image_b64):
+        image_bytes = base64.b64decode(image_b64)
+        pil_image = Image.open(io.BytesIO(image_bytes))
+        pil_image.load()
+        if pil_image.mode not in ("RGB", "RGBA"):
+            pil_image = pil_image.convert("RGBA" if "A" in pil_image.getbands() else "RGB")
+        image_np = np.asarray(pil_image).astype(np.float32) / 255.0
+        if image_np.ndim == 2:
+            image_np = np.stack([image_np] * 3, axis=-1)
+        return torch.from_numpy(image_np).unsqueeze(0)
+
+    def edit_image(
+        self,
+        image_1,
+        prompt,
+        model,
+        quality,
+        size_mode,
+        size,
+        background,
+        output_format,
+        output_compression,
+        moderation,
+        api_key,
+        api_key_env_var,
+        mask_image=None,
+        image_2=None,
+        region_info="",
+    ):
+        try:
+            resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
+            resolved_size, size_source = self._resolve_size(size_mode, size, region_info, mask_image)
+
+            if model == "gpt-image-2" and background == "transparent":
+                raise ValueError("gpt-image-2 does not currently support background=transparent.")
+
+            image_1_bytes, image_size = self._image_tensor_to_png_bytes(image_1)
+            files = [("image[]", ("image_1.png", image_1_bytes, "image/png"))]
+            if image_2 is not None:
+                image_2_bytes, _ = self._image_tensor_to_png_bytes(image_2)
+                files.append(("image[]", ("image_2.png", image_2_bytes, "image/png")))
+
+            if mask_image is not None:
+                mask_bytes = self._mask_tensor_to_png_bytes(mask_image, image_size)
+                files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+
+            data = {
+                "model": model,
+                "prompt": _coerce_text_value(prompt),
+                "quality": quality,
+                "size": resolved_size,
+                "background": background,
+                "output_format": output_format,
+                "moderation": moderation,
+            }
+            if output_format in ("jpeg", "webp"):
+                data["output_compression"] = str(int(output_compression))
+
+            response = requests.post(
+                "https://api.openai.com/v1/images/edits",
+                headers={"Authorization": f"Bearer {resolved_api_key}"},
+                data=data,
+                files=files,
+                timeout=300,
+            )
+
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+
+            if not response.ok:
+                message = None
+                if isinstance(payload, dict):
+                    message = payload.get("error", {}).get("message")
+                raise RuntimeError(message or f"OpenAI Images API request failed with status {response.status_code}.")
+
+            if not isinstance(payload, dict) or not payload.get("data"):
+                raise RuntimeError("OpenAI Images API returned no image data.")
+
+            image_b64 = payload["data"][0].get("b64_json")
+            if not image_b64:
+                raise RuntimeError("OpenAI Images API returned an image without b64_json.")
+
+            output_image = self._decode_image_result(image_b64)
+            info = {
+                "model": model,
+                "quality": quality,
+                "size_mode": size_mode,
+                "resolved_size": resolved_size,
+                "size_source": size_source,
+                "background": background,
+                "output_format": output_format,
+                "moderation": moderation,
+                "api_key_source": api_key_source,
+                "mask_used": mask_image is not None,
+                "reference_image_used": image_2 is not None,
+                "request_id": response.headers.get("x-request-id", ""),
+                "usage": payload.get("usage"),
+            }
+            return (output_image, json.dumps(info))
+        except Exception as e:
+            logger.error("OpenAI image edit failed: %s", str(e))
+            raise RuntimeError(f"OpenAI image edit failed: {str(e)}") from e
+
+
 # ===========================================================================
 #  ComfyUI registration
 # ===========================================================================
@@ -2502,6 +2953,7 @@ NODE_CLASS_MAPPINGS = {
     "InpaintStitchNB2":    InpaintStitchNB2,
     "NB2AddAlpha":         NB2AddAlpha,
     "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
+    "NB2OpenAIImageEdit": NB2OpenAIImageEdit,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2513,4 +2965,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
     "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
+    "NB2OpenAIImageEdit": "OpenAI GPT Image Edit",
 }

@@ -2,183 +2,504 @@
   "id": "dbef870e-e53b-4ae5-b5f2-2d0aa6670002",
   "revision": 0,
   "last_node_id": 9,
-  "last_link_id": 11,
+  "last_link_id": 12,
   "nodes": [
     {
       "id": 1,
       "type": "LoadImage",
-      "pos": [40, 120],
-      "size": [290, 314],
+      "pos": [
+        40,
+        120
+      ],
+      "size": [
+        290,
+        314
+      ],
       "flags": {},
       "order": 0,
       "mode": 0,
       "inputs": [],
       "outputs": [
-        {"name": "IMAGE", "type": "IMAGE", "links": [1]},
-        {"name": "MASK", "type": "MASK", "links": null}
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
       ],
-      "properties": {"Node name for S&R": "LoadImage"},
-      "widgets_values": ["example.png", "image"]
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
     },
     {
       "id": 2,
       "type": "NB2Florence2RegionSelector",
-      "pos": [360, 110],
-      "size": [320, 210],
+      "pos": [
+        360,
+        110
+      ],
+      "size": [
+        320,
+        210
+      ],
       "flags": {},
       "order": 1,
       "mode": 0,
       "inputs": [
-        {"name": "image", "type": "IMAGE", "link": 1}
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        }
       ],
       "outputs": [
-        {"name": "mask", "type": "MASK", "links": [2]},
-        {"name": "mask_image", "type": "IMAGE", "links": null},
-        {"name": "info", "type": "STRING", "links": null},
-        {"name": "center_x", "type": "INT", "links": null},
-        {"name": "center_y", "type": "INT", "links": null},
-        {"name": "crop_width", "type": "INT", "links": null},
-        {"name": "crop_height", "type": "INT", "links": null}
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "mask_image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": [
+            12
+          ]
+        },
+        {
+          "name": "center_x",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "center_y",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "crop_width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "crop_height",
+          "type": "INT",
+          "links": null
+        }
       ],
-      "properties": {"Node name for S&R": "NB2Florence2RegionSelector"},
-      "widgets_values": ["face", "", "largest", 12, false, "", "FAL_KEY"]
+      "properties": {
+        "Node name for S&R": "NB2Florence2RegionSelector"
+      },
+      "widgets_values": [
+        "face",
+        "",
+        "largest",
+        12,
+        false,
+        "",
+        "FAL_KEY"
+      ]
     },
     {
       "id": 3,
       "type": "SmartMaskCrop",
-      "pos": [730, 100],
-      "size": [320, 250],
+      "pos": [
+        730,
+        100
+      ],
+      "size": [
+        320,
+        250
+      ],
       "flags": {},
       "order": 2,
       "mode": 0,
       "inputs": [
-        {"name": "image", "type": "IMAGE", "link": 3},
-        {"name": "mask", "type": "MASK", "link": 2}
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 2
+        }
       ],
       "outputs": [
-        {"name": "stitcher", "type": "STITCHER", "links": [4]},
-        {"name": "cropped_image", "type": "IMAGE", "links": [5, 10]},
-        {"name": "cropped_mask", "type": "MASK", "links": null},
-        {"name": "cropped_mask_image", "type": "IMAGE", "links": [6, 8]},
-        {"name": "preview_image", "type": "IMAGE", "links": null},
-        {"name": "info", "type": "STRING", "links": null}
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "cropped_image",
+          "type": "IMAGE",
+          "links": [
+            5,
+            10
+          ]
+        },
+        {
+          "name": "cropped_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "cropped_mask_image",
+          "type": "IMAGE",
+          "links": [
+            6,
+            8
+          ]
+        },
+        {
+          "name": "preview_image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": null
+        }
       ],
-      "properties": {"Node name for S&R": "SmartMaskCrop"},
-      "widgets_values": [1.15, "resize_to_target", 1024, 1024, "bilinear", "bicubic", "gpu (much faster)", true]
+      "properties": {
+        "Node name for S&R": "SmartMaskCrop"
+      },
+      "widgets_values": [
+        1.15,
+        "resize_to_target",
+        1024,
+        1024,
+        "bilinear",
+        "bicubic",
+        "gpu (much faster)",
+        true
+      ]
     },
     {
       "id": 4,
-      "type": "GPTImage2EditNode",
-      "pos": [1090, 90],
-      "size": [400, 340],
+      "type": "NB2OpenAIImageEdit",
+      "pos": [
+        1090,
+        90
+      ],
+      "size": [
+        400,
+        340
+      ],
       "flags": {},
       "order": 3,
       "mode": 0,
       "inputs": [
-        {"name": "image_1", "type": "IMAGE", "link": 5},
-        {"name": "mask_image", "type": "IMAGE", "link": 6}
+        {
+          "name": "image_1",
+          "type": "IMAGE",
+          "link": 5
+        },
+        {
+          "name": "mask_image",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "name": "region_info",
+          "type": "STRING",
+          "link": 12
+        }
       ],
       "outputs": [
-        {"name": "images", "type": "IMAGE", "links": [7]},
-        {"name": "info", "type": "STRING", "links": null}
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": null
+        }
       ],
-      "properties": {"Node name for S&R": "GPTImage2EditNode"},
+      "properties": {
+        "Node name for S&R": "NB2OpenAIImageEdit"
+      },
       "widgets_values": [
         "Retouch only the face area. Keep identity, framing, pose, lighting, and background unchanged. Improve facial details naturally.",
-        "preset",
-        "auto",
-        "16:9",
-        "1K",
-        1024,
-        1024,
+        "gpt-image-2",
         "high",
-        1,
+        "auto_from_region",
+        "auto",
+        "auto",
         "png",
-        false
+        90,
+        "auto",
+        "",
+        "OPENAI_API_KEY"
       ]
     },
     {
       "id": 5,
       "type": "SmartMaskStitch",
-      "pos": [1530, 95],
-      "size": [300, 80],
+      "pos": [
+        1530,
+        95
+      ],
+      "size": [
+        300,
+        80
+      ],
       "flags": {},
       "order": 4,
       "mode": 0,
       "inputs": [
-        {"name": "stitcher", "type": "STITCHER", "link": 4},
-        {"name": "edited_image", "type": "IMAGE", "link": 7}
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "link": 4
+        },
+        {
+          "name": "edited_image",
+          "type": "IMAGE",
+          "link": 7
+        }
       ],
       "outputs": [
-        {"name": "image", "type": "IMAGE", "links": [11]}
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            11
+          ]
+        }
       ],
-      "properties": {"Node name for S&R": "SmartMaskStitch"},
-      "widgets_values": [4]
+      "properties": {
+        "Node name for S&R": "SmartMaskStitch"
+      },
+      "widgets_values": [
+        4
+      ]
     },
     {
       "id": 6,
       "type": "PreviewImage",
-      "pos": [1860, 90],
-      "size": [140, 240],
+      "pos": [
+        1860,
+        90
+      ],
+      "size": [
+        140,
+        240
+      ],
       "flags": {},
       "order": 5,
       "mode": 0,
-      "inputs": [{"name": "images", "type": "IMAGE", "link": 11}],
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
       "outputs": [],
-      "properties": {"Node name for S&R": "PreviewImage"},
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
       "widgets_values": []
     },
     {
       "id": 7,
       "type": "SaveImage",
-      "pos": [1855, 360],
-      "size": [270, 270],
+      "pos": [
+        1855,
+        360
+      ],
+      "size": [
+        270,
+        270
+      ],
       "flags": {},
       "order": 6,
       "mode": 0,
-      "inputs": [{"name": "images", "type": "IMAGE", "link": 11}],
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
       "outputs": [],
-      "properties": {"Node name for S&R": "SaveImage"},
-      "widgets_values": ["ComfyUI"]
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "ComfyUI"
+      ]
     },
     {
       "id": 8,
       "type": "PreviewImage",
-      "pos": [730, 410],
-      "size": [140, 240],
+      "pos": [
+        730,
+        410
+      ],
+      "size": [
+        140,
+        240
+      ],
       "flags": {},
       "order": 7,
       "mode": 0,
-      "inputs": [{"name": "images", "type": "IMAGE", "link": 8}],
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 8
+        }
+      ],
       "outputs": [],
-      "properties": {"Node name for S&R": "PreviewImage"},
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
       "widgets_values": []
     },
     {
       "id": 9,
       "type": "PreviewImage",
-      "pos": [1095, 450],
-      "size": [140, 240],
+      "pos": [
+        1095,
+        450
+      ],
+      "size": [
+        140,
+        240
+      ],
       "flags": {},
       "order": 8,
       "mode": 0,
-      "inputs": [{"name": "images", "type": "IMAGE", "link": 10}],
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 10
+        }
+      ],
       "outputs": [],
-      "properties": {"Node name for S&R": "PreviewImage"},
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
       "widgets_values": []
     }
   ],
   "links": [
-    [1, 1, 0, 2, 0, "IMAGE"],
-    [2, 2, 0, 3, 1, "MASK"],
-    [3, 1, 0, 3, 0, "IMAGE"],
-    [4, 3, 0, 5, 0, "STITCHER"],
-    [5, 3, 1, 4, 0, "IMAGE"],
-    [6, 3, 3, 4, 1, "IMAGE"],
-    [7, 4, 0, 5, 1, "IMAGE"],
-    [8, 3, 3, 8, 0, "IMAGE"],
-    [10, 3, 1, 9, 0, "IMAGE"],
-    [11, 5, 0, 6, 0, "IMAGE"]
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      1,
+      "MASK"
+    ],
+    [
+      3,
+      1,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ],
+    [
+      4,
+      3,
+      0,
+      5,
+      0,
+      "STITCHER"
+    ],
+    [
+      5,
+      3,
+      1,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      6,
+      3,
+      3,
+      4,
+      1,
+      "IMAGE"
+    ],
+    [
+      7,
+      4,
+      0,
+      5,
+      1,
+      "IMAGE"
+    ],
+    [
+      8,
+      3,
+      3,
+      8,
+      0,
+      "IMAGE"
+    ],
+    [
+      10,
+      3,
+      1,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      11,
+      5,
+      0,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      12,
+      2,
+      2,
+      4,
+      2,
+      "STRING"
+    ]
   ],
   "groups": [],
   "config": {},

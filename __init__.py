@@ -3,6 +3,7 @@ from .nodes import (
     InpaintStitchNB2,
     NB2AddAlpha,
     NB2Florence2RegionSelector,
+    NB2OpenAIImageEdit,
     NB2SmartRegionMask,
     NanoBanana2MaskGen,
     SmartMaskCrop,
@@ -20,6 +21,7 @@ NODE_CLASS_MAPPINGS = {
     "InpaintStitchNB2": InpaintStitchNB2,
     "NB2AddAlpha": NB2AddAlpha,
     "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
+    "NB2OpenAIImageEdit": NB2OpenAIImageEdit,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -31,6 +33,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintStitchNB2": "NB2 Stitch",
     "NB2AddAlpha": "NB2 Add Alpha",
     "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
+    "NB2OpenAIImageEdit": "OpenAI GPT Image Edit",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
