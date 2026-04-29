@@ -3,6 +3,13 @@ name = "comfyui-inpaint-cropstitch-nb2"
 version = "1.0.0"
 description = "Fork of ComfyUI-Inpaint-CropAndStitch adapted for Nano Banana 2. Adds NB2 Mask Generator, exact-resolution cropping and feathered alpha compositing in the stitch step."
 license = { file = "LICENSE" }
+dependencies = [
+    "fal-client>=0.4.1",
+    "numpy>=1.24.0",
+    "pillow>=10.0.0",
+    "requests>=2.32.0",
+    "torch>=2.0.0",
+]
 
 [project.urls]
 Repository  = "https://github.com/amortegui84/comfyui-inpaint-cropstitch-nb2"

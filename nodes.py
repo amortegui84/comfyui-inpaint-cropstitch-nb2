@@ -33,6 +33,9 @@ Intended workflow
 
 import comfy.utils
 import comfy.model_management
+import io
+import json
+import logging
 import math
 import nodes
 import numpy as np
@@ -44,6 +47,8 @@ import torchvision.transforms.functional as F
 from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter, grey_dilation, binary_closing, binary_fill_holes
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
 
 try:
     import folder_paths as _folder_paths
@@ -1902,6 +1907,484 @@ class NB2AddAlpha:
 
 
 # ===========================================================================
+#  NEW NODE 5 — Florence-2 Smart Region Selector (FAL API)
+# ===========================================================================
+
+class NB2Florence2RegionSelector:
+    """
+    Select a semantic region through the external Florence-2 FAL API.
+
+    The API key is never stored in code. Users can either:
+    - paste it into the `api_key` input for the current session, or
+    - leave `api_key` blank and provide it via an environment variable
+      such as FAL_KEY.
+    """
+
+    REGION_TYPE_OPTIONS = ["face", "upper_body", "lower_body", "full_body", "object"]
+    SELECTION_MODE_OPTIONS = ["largest", "merge_all"]
+    REGION_QUERY_MAP = {
+        "face": "face",
+        "upper_body": "upper body",
+        "lower_body": "lower body",
+        "full_body": "full body person",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "region_type": (cls.REGION_TYPE_OPTIONS, {"default": "face"}),
+            },
+            "optional": {
+                "custom_text": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Only used when region_type is object",
+                    },
+                ),
+                "selection_mode": (
+                    cls.SELECTION_MODE_OPTIONS,
+                    {"default": "largest"},
+                ),
+                "padding_percent": (
+                    "FLOAT",
+                    {
+                        "default": 8.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                    },
+                ),
+                "return_rect_mask": ("BOOLEAN", {"default": False}),
+                "api_key": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Optional. Leave blank to use FAL_KEY",
+                    },
+                ),
+                "api_key_env_var": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "FAL_KEY",
+                        "placeholder": "Environment variable fallback",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "IMAGE", "STRING", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "mask",
+        "mask_image",
+        "info",
+        "center_x",
+        "center_y",
+        "crop_width",
+        "crop_height",
+    )
+    FUNCTION = "select_region"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Select one semantic region at a time using Florence-2 through the FAL API. "
+        "API key can be provided by input or environment variable."
+    )
+
+    def _resolve_api_key(self, api_key, api_key_env_var):
+        direct_key = (api_key or "").strip()
+        if direct_key:
+            return direct_key
+
+        env_name = (api_key_env_var or "FAL_KEY").strip() or "FAL_KEY"
+        env_key = os.getenv(env_name, "").strip()
+        if env_key:
+            return env_key
+
+        raise ValueError(
+            f"Missing FAL API key. Paste it into api_key or set the {env_name} environment variable."
+        )
+
+    def _get_fal_client(self):
+        try:
+            import fal_client
+        except ImportError as e:
+            raise RuntimeError(
+                "fal-client is not installed. Install it in ComfyUI's Python environment."
+            ) from e
+        return fal_client
+
+    def _normalize_image_array(self, image):
+        if isinstance(image, torch.Tensor):
+            image_np = image.detach().cpu().numpy()
+        else:
+            image_np = np.asarray(image)
+
+        if image_np.ndim == 4 and image_np.shape[0] == 1:
+            image_np = image_np[0]
+        elif image_np.ndim == 3 and image_np.shape[0] in (3, 4):
+            image_np = np.transpose(image_np, (1, 2, 0))
+
+        if image_np.dtype != np.uint8:
+            if image_np.max() <= 1.0:
+                image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+            else:
+                image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+
+        if image_np.ndim == 2:
+            image_np = np.stack([image_np] * 3, axis=-1)
+
+        if image_np.shape[-1] == 4:
+            image_np = image_np[..., :3]
+
+        return image_np
+
+    def _build_query(self, region_type, custom_text):
+        custom_text = (custom_text or "").strip()
+        if region_type == "object":
+            if not custom_text:
+                raise ValueError("custom_text is required when region_type is object.")
+            return custom_text
+
+        if custom_text:
+            raise ValueError("custom_text can only be used when region_type is object.")
+
+        return self.REGION_QUERY_MAP[region_type]
+
+    def _image_tensor_to_png_bytes(self, image_tensor, max_dimension=None):
+        image_np = self._normalize_image_array(image_tensor)
+        image = Image.fromarray(image_np)
+
+        if max_dimension is not None:
+            width, height = image.size
+            longest_edge = max(width, height)
+            if longest_edge > max_dimension:
+                scale = max_dimension / float(longest_edge)
+                resized_size = (
+                    max(1, int(round(width * scale))),
+                    max(1, int(round(height * scale))),
+                )
+                image = image.resize(resized_size, Image.LANCZOS)
+                logger.info(
+                    "Downscaled image before upload from %sx%s to %sx%s",
+                    width,
+                    height,
+                    resized_size[0],
+                    resized_size[1],
+                )
+
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        return buffered.getvalue()
+
+    def _upload_image(self, image_tensor, api_key, max_dimension=None):
+        fal_client = self._get_fal_client()
+        previous_key = os.environ.get("FAL_KEY")
+        os.environ["FAL_KEY"] = api_key
+        try:
+            return fal_client.upload(
+                self._image_tensor_to_png_bytes(image_tensor, max_dimension=max_dimension),
+                "image/png",
+            )
+        finally:
+            if previous_key is None:
+                os.environ.pop("FAL_KEY", None)
+            else:
+                os.environ["FAL_KEY"] = previous_key
+
+    def _call_api(self, endpoint, arguments, api_key):
+        fal_client = self._get_fal_client()
+        previous_key = os.environ.get("FAL_KEY")
+        os.environ["FAL_KEY"] = api_key
+        try:
+            result = fal_client.run(endpoint, arguments=arguments)
+            logger.debug("FAL API response from %s: %s", endpoint, json.dumps(result))
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Failed to call FAL endpoint {endpoint}: {str(e)}") from e
+        finally:
+            if previous_key is None:
+                os.environ.pop("FAL_KEY", None)
+            else:
+                os.environ["FAL_KEY"] = previous_key
+
+    def _is_point_pair(self, value):
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) >= 2
+            and all(isinstance(v, (int, float)) for v in value[:2])
+        )
+
+    def _extract_points_recursive(self, value):
+        if isinstance(value, dict):
+            if "x" in value and "y" in value:
+                x = value["x"]
+                y = value["y"]
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    return [(float(x), float(y))]
+            for nested in value.values():
+                points = self._extract_points_recursive(nested)
+                if points and len(points) >= 3:
+                    return points
+            return None
+
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 3 and all(self._is_point_pair(item) for item in value):
+                return [(float(item[0]), float(item[1])) for item in value]
+
+            collected = []
+            for item in value:
+                points = self._extract_points_recursive(item)
+                if points and len(points) >= 3:
+                    return points
+                if points and len(points) == 1:
+                    collected.extend(points)
+            if len(collected) >= 3:
+                return collected
+
+        return None
+
+    def _extract_bbox(self, value):
+        if isinstance(value, dict):
+            if all(key in value for key in ("x1", "y1", "x2", "y2")):
+                coords = (value["x1"], value["y1"], value["x2"], value["y2"])
+                if all(isinstance(v, (int, float)) for v in coords):
+                    return tuple(float(v) for v in coords)
+            if all(key in value for key in ("xmin", "ymin", "xmax", "ymax")):
+                coords = (value["xmin"], value["ymin"], value["xmax"], value["ymax"])
+                if all(isinstance(v, (int, float)) for v in coords):
+                    return tuple(float(v) for v in coords)
+            if "bbox" in value:
+                bbox = self._extract_bbox(value["bbox"])
+                if bbox:
+                    return bbox
+            for nested in value.values():
+                bbox = self._extract_bbox(nested)
+                if bbox:
+                    return bbox
+            return None
+
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            if all(isinstance(v, (int, float)) for v in value[:4]):
+                x1, y1, x2, y2 = [float(v) for v in value[:4]]
+                if x2 > x1 and y2 > y1:
+                    return (x1, y1, x2, y2)
+
+        return None
+
+    def _polygon_area(self, points):
+        pts = list(points)
+        if len(pts) < 3:
+            return 0.0
+        area = 0.0
+        for index, (x1, y1) in enumerate(pts):
+            x2, y2 = pts[(index + 1) % len(pts)]
+            area += x1 * y2 - x2 * y1
+        return abs(area) * 0.5
+
+    def _bbox_area(self, bbox):
+        x1, y1, x2, y2 = bbox
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+    def _coerce_polygon_entries(self, result):
+        polygons = result.get("results", {}).get("polygons", [])
+        output = []
+        for entry in polygons:
+            points = self._extract_points_recursive(entry)
+            if points and len(points) >= 3:
+                output.append(points)
+        return output
+
+    def _coerce_bbox_entries(self, result):
+        bboxes = result.get("results", {}).get("bboxes", [])
+        output = []
+        for entry in bboxes:
+            bbox = self._extract_bbox(entry)
+            if bbox:
+                output.append(bbox)
+        return output
+
+    def _render_mask_from_polygons(self, width, height, polygons, selection_mode):
+        if selection_mode == "largest":
+            polygons = [max(polygons, key=self._polygon_area)]
+
+        mask_image = Image.new("L", (width, height), 0)
+        drawer = ImageDraw.Draw(mask_image)
+        for polygon in polygons:
+            drawer.polygon(polygon, fill=255)
+        return np.array(mask_image, dtype=np.uint8)
+
+    def _render_mask_from_bboxes(self, width, height, bboxes, selection_mode):
+        if selection_mode == "largest":
+            bboxes = [max(bboxes, key=self._bbox_area)]
+
+        mask_image = Image.new("L", (width, height), 0)
+        drawer = ImageDraw.Draw(mask_image)
+        for x1, y1, x2, y2 in bboxes:
+            drawer.rectangle((x1, y1, x2, y2), fill=255)
+        return np.array(mask_image, dtype=np.uint8)
+
+    def _apply_padding(self, bbox, width, height, padding_percent):
+        x1, y1, x2, y2 = bbox
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        pad_x = int(round(box_w * (padding_percent / 100.0)))
+        pad_y = int(round(box_h * (padding_percent / 100.0)))
+        return (
+            max(0, x1 - pad_x),
+            max(0, y1 - pad_y),
+            min(width, x2 + pad_x),
+            min(height, y2 + pad_y),
+        )
+
+    def _mask_bbox(self, mask_uint8):
+        ys, xs = np.nonzero(mask_uint8 > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            raise RuntimeError("Florence did not return a usable region.")
+        return (
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        )
+
+    def _rect_mask_from_bbox(self, width, height, bbox):
+        mask = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = bbox
+        mask[y1:y2, x1:x2] = 255
+        return mask
+
+    def _mask_to_outputs(self, mask_uint8):
+        mask_float = mask_uint8.astype(np.float32) / 255.0
+        mask_tensor = torch.from_numpy(mask_float).unsqueeze(0)
+        mask_rgb = np.stack([mask_float] * 3, axis=-1)
+        mask_image_tensor = torch.from_numpy(mask_rgb).unsqueeze(0)
+        return mask_tensor, mask_image_tensor
+
+    def _call_segmentation(self, image_url, query, api_key):
+        return self._call_api(
+            "fal-ai/florence-2-large/referring-expression-segmentation",
+            {"image_url": image_url, "text_input": query},
+            api_key,
+        )
+
+    def _call_grounding(self, image_url, query, api_key):
+        return self._call_api(
+            "fal-ai/florence-2-large/caption-to-phrase-grounding",
+            {"image_url": image_url, "text_input": query},
+            api_key,
+        )
+
+    def select_region(
+        self,
+        image,
+        region_type,
+        custom_text="",
+        selection_mode="largest",
+        padding_percent=8.0,
+        return_rect_mask=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+    ):
+        try:
+            if not isinstance(image, torch.Tensor):
+                raise ValueError("image input must be a ComfyUI IMAGE tensor.")
+            if image.ndim != 4:
+                raise ValueError(
+                    f"Expected IMAGE tensor with shape [B,H,W,C], got {tuple(image.shape)}."
+                )
+            if image.shape[0] != 1:
+                raise ValueError(
+                    "NB2Florence2RegionSelector currently supports batch size 1 only."
+                )
+
+            resolved_api_key = self._resolve_api_key(api_key, api_key_env_var)
+            query = self._build_query(region_type, custom_text)
+            image_url = self._upload_image(image, resolved_api_key, max_dimension=2048)
+            image_np = self._normalize_image_array(image[0:1])
+            height, width = image_np.shape[:2]
+
+            logger.info(
+                "Running Florence selector via FAL with region_type=%s query=%s",
+                region_type,
+                query,
+            )
+
+            mask_uint8 = None
+            source = None
+
+            segmentation_result = self._call_segmentation(image_url, query, resolved_api_key)
+            polygons = self._coerce_polygon_entries(segmentation_result)
+            if polygons:
+                mask_uint8 = self._render_mask_from_polygons(
+                    width, height, polygons, selection_mode
+                )
+                source = "referring-expression-segmentation"
+
+            if mask_uint8 is None:
+                grounding_result = self._call_grounding(image_url, query, resolved_api_key)
+                bboxes = self._coerce_bbox_entries(grounding_result)
+                if not bboxes:
+                    raise RuntimeError(
+                        "Florence returned no polygons and no bounding boxes for this region."
+                    )
+                mask_uint8 = self._render_mask_from_bboxes(
+                    width, height, bboxes, selection_mode
+                )
+                source = "caption-to-phrase-grounding"
+
+            bbox = self._mask_bbox(mask_uint8)
+            padded_bbox = self._apply_padding(bbox, width, height, padding_percent)
+
+            if return_rect_mask:
+                output_mask_uint8 = self._rect_mask_from_bbox(width, height, padded_bbox)
+            else:
+                output_mask_uint8 = mask_uint8.copy()
+
+            center_x = int(round((padded_bbox[0] + padded_bbox[2]) / 2.0))
+            center_y = int(round((padded_bbox[1] + padded_bbox[3]) / 2.0))
+            crop_width = int(padded_bbox[2] - padded_bbox[0])
+            crop_height = int(padded_bbox[3] - padded_bbox[1])
+
+            mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
+            info = {
+                "region_type": region_type,
+                "query": query,
+                "source": source,
+                "selection_mode": selection_mode,
+                "padding_percent": padding_percent,
+                "api_key_source": "direct_input" if (api_key or "").strip() else "environment",
+                "bbox": {
+                    "x1": int(padded_bbox[0]),
+                    "y1": int(padded_bbox[1]),
+                    "x2": int(padded_bbox[2]),
+                    "y2": int(padded_bbox[3]),
+                },
+                "center_x": center_x,
+                "center_y": center_y,
+                "crop_width": crop_width,
+                "crop_height": crop_height,
+            }
+
+            return (
+                mask_tensor,
+                mask_image_tensor,
+                json.dumps(info),
+                center_x,
+                center_y,
+                crop_width,
+                crop_height,
+            )
+        except Exception as e:
+            logger.error("Florence region selection failed: %s", str(e))
+            raise RuntimeError(f"Florence region selection failed: {str(e)}") from e
+
+
+# ===========================================================================
 #  ComfyUI registration
 # ===========================================================================
 
@@ -1913,6 +2396,7 @@ NODE_CLASS_MAPPINGS = {
     "InpaintCropNB2":      InpaintCropNB2,
     "InpaintStitchNB2":    InpaintStitchNB2,
     "NB2AddAlpha":         NB2AddAlpha,
+    "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1923,4 +2407,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintCropNB2":      "✂️ NB2 Crop",
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
+    "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
 }

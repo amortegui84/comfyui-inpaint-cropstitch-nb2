@@ -49,6 +49,37 @@ stitch             -> downscales 5504×3072 to 2752×1536, composites back
 
 ## Nodes
 
+### Florence-2 Smart Region Selector (FAL API)
+
+External Florence-2 region selector integrated into this repo. It calls FAL's Florence API, returns a ComfyUI mask, and is intended to feed `NB2 Smart Region` or `Smart Mask Crop`.
+
+| Input | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| region_type | choice | `face`, `upper_body`, `lower_body`, `full_body`, `object` |
+| custom_text | STRING | Required only when `region_type = object` |
+| selection_mode | choice | `largest` or `merge_all` |
+| padding_percent | FLOAT | Expands the detected region bbox for downstream crop sizing |
+| return_rect_mask | BOOLEAN | Return a rectangular bbox mask instead of the raw semantic mask |
+| api_key | STRING | Optional direct API key input. Leave blank if using an env var |
+| api_key_env_var | STRING | Env var name fallback, default `FAL_KEY` |
+
+Outputs: `mask`, `mask_image`, `info`, `center_x`, `center_y`, `crop_width`, `crop_height`
+
+Security notes:
+
+- The repo does not store any API key.
+- All bundled workflows leave `api_key` empty.
+- For safer usage, prefer setting `FAL_KEY` in the environment and keep `api_key` blank.
+- If you paste a key into the node and save the workflow yourself, ComfyUI may persist that widget value into the workflow JSON.
+
+Typical flow:
+```
+NB2Florence2RegionSelector -> mask -> NB2 Smart Region -> NB2 Crop -> Nano Banana 2 -> NB2 Stitch
+```
+
+---
+
 ### NB2 Mask Generator
 
 Interactive node that generates a rectangular mask at an exact position on the original image, with an aspect ratio that matches an NB2 resolution.
@@ -86,7 +117,7 @@ Outputs: `mask`, `nb2_width`, `nb2_height`, `preview_image`, `center_x`, `center
 
 Typical flow:
 ```
-Florence2Run (kijai) -> mask -> NB2 Smart Region -> NB2 Crop -> Nano Banana 2 -> NB2 Stitch
+NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> NB2 Smart Region -> NB2 Crop -> Nano Banana 2 -> NB2 Stitch
 ```
 
 ---
@@ -147,7 +178,7 @@ Outputs: `stitcher`, `cropped_image`, `cropped_mask`, `cropped_mask_image`, `pre
 
 Typical flow:
 ```
-Florence2Run (kijai) -> mask -> Smart Mask Crop -> GPT Image 2 Edit -> Smart Mask Stitch
+NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> Smart Mask Crop -> GPT Image 2 Edit -> Smart Mask Stitch
 ```
 
 ---
@@ -184,7 +215,7 @@ Outputs: `rgba_image`
 ### Path 1 — NB2 region retouch
 
 ```
-Florence2Run (kijai) or NB2 Mask Generator
+NB2Florence2RegionSelector or Florence2Run (kijai) or NB2 Mask Generator
     -> NB2 Smart Region (or direct mask)
     -> NB2 Crop
     -> Nano Banana 2 generation
@@ -194,7 +225,7 @@ Florence2Run (kijai) or NB2 Mask Generator
 ### Path 2 — Local masked edit (GPT Image, etc.)
 
 ```
-Florence2Run (kijai)
+NB2Florence2RegionSelector or Florence2Run (kijai)
     -> mask
     -> Smart Mask Crop
         -> cropped_image        -> GPT Image 2 Edit
@@ -216,8 +247,8 @@ Florence2Run (kijai)
 | File | Description |
 |---|---|
 | `inpainting_workflow.json` | Original NB2 crop/stitch workflow |
-| `01_nb2_smart_region_face_roundtrip.json` | Florence2 → NB2 Smart Region → NB2 round-trip |
-| `02_local_mask_edit_face_gpt_image2.json` | Florence2 → Smart Mask Crop → GPT Image 2 |
+| `01_nb2_smart_region_face_roundtrip.json` | FAL Florence-2 → NB2 Smart Region → NB2 round-trip |
+| `02_local_mask_edit_face_gpt_image2.json` | FAL Florence-2 → Smart Mask Crop → GPT Image 2 |
 | `03_local_mask_edit_object_template.json` | Object local mask edit template |
 | `04_nb2_upper_body_template.json` | Upper body NB2 template |
 
@@ -249,9 +280,19 @@ git pull
 
 Restart ComfyUI after updating.
 
+### Python dependencies
+
+This repo now includes an external Florence-2 node that needs `fal-client` in the same Python environment ComfyUI uses.
+
+```bash
+python -m pip install fal-client requests pillow numpy
+```
+
+Restart ComfyUI after installing dependencies.
+
 ### Optional dependency — Florence2
 
-Required for workflows that use `Florence2Run` (kijai) as the mask source. Runs **fully local — no API key needed**.
+Optional only if you also want the fully local `Florence2Run` path from kijai. That path runs **fully local — no API key needed**.
 
 ```bash
 cd ComfyUI/custom_nodes

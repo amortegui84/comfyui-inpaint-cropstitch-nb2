@@ -22,7 +22,7 @@
     },
     {
       "id": 2,
-      "type": "Florence2RegionSelectorNode",
+      "type": "NB2Florence2RegionSelector",
       "pos": [360, 110],
       "size": [320, 210],
       "flags": {},
@@ -40,8 +40,8 @@
         {"name": "crop_width", "type": "INT", "links": null},
         {"name": "crop_height", "type": "INT", "links": null}
       ],
-      "properties": {"Node name for S&R": "Florence2RegionSelectorNode"},
-      "widgets_values": ["upper_body", "", "largest", 12, false]
+      "properties": {"Node name for S&R": "NB2Florence2RegionSelector"},
+      "widgets_values": ["upper_body", "", "largest", 12, false, "", "FAL_KEY"]
     },
     {
       "id": 3,
