@@ -1169,6 +1169,39 @@ def _parse_edit_size(size_value: str) -> tuple[int, int]:
     if not match:
         raise ValueError(f"Unsupported edit size value: {size_value}")
     return int(match.group(1)), int(match.group(2))
+
+
+def _fit_aspect_rect_to_bbox(x: int, y: int, w: int, h: int,
+                             image_w: int, image_h: int,
+                             target_ar: float) -> tuple[int, int, int, int]:
+    center_x = x + (w / 2.0)
+    center_y = y + (h / 2.0)
+    if (w / max(1.0, h)) < target_ar:
+        rect_h = float(h)
+        rect_w = rect_h * target_ar
+    else:
+        rect_w = float(w)
+        rect_h = rect_w / target_ar
+
+    max_rect_w = float(image_w)
+    max_rect_h = max_rect_w / target_ar
+    if max_rect_h > image_h:
+        max_rect_h = float(image_h)
+        max_rect_w = max_rect_h * target_ar
+
+    rect_w = min(rect_w, max_rect_w)
+    rect_h = min(rect_h, max_rect_h)
+
+    rect_w_i = max(1, int(round(rect_w)))
+    rect_h_i = max(1, int(round(rect_h)))
+    rect_h_i = max(1, min(image_h, int(round(rect_w_i / target_ar))))
+    rect_w_i = max(1, min(image_w, int(round(rect_h_i * target_ar))))
+
+    rect_x = int(round(center_x - rect_w_i / 2.0))
+    rect_y = int(round(center_y - rect_h_i / 2.0))
+    rect_x = max(0, min(rect_x, image_w - rect_w_i))
+    rect_y = max(0, min(rect_y, image_h - rect_h_i))
+    return rect_x, rect_y, rect_w_i, rect_h_i
 # ===========================================================================
 #  NEW NODE 1 — NanoBanana2MaskGen
 # ===========================================================================
@@ -1446,8 +1479,8 @@ class SmartMaskCrop:
                     "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5,
                     "tooltip": "Softens the edit mask edges after crop. 0 uses region defaults when guidance is enabled.",
                 }),
-                "resize_mode": (["keep_local_size", "resize_to_target"], {
-                    "default": "resize_to_target"}),
+                "resize_mode": (["keep_local_size", "upscale_to_target_if_smaller", "resize_to_target"], {
+                    "default": "upscale_to_target_if_smaller"}),
                 "target_width": ("INT", {
                     "default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1}),
                 "target_height": ("INT", {
@@ -1542,6 +1575,8 @@ class SmartMaskCrop:
         for i in range(batch_size):
             sub_image = image[i:i+1]
             sub_mask = mask[i:i+1]
+            image_h = sub_image.shape[1]
+            image_w = sub_image.shape[2]
 
             _, bx, by, bw, bh = processor.batched_findcontextarea_m(sub_mask)
             if bx[0] == -1:
@@ -1557,10 +1592,19 @@ class SmartMaskCrop:
             cur_w = bw[0].item()
             cur_h = bh[0].item()
 
+            target_ar = target_width_effective / max(1, target_height_effective)
+            rect_x, rect_y, rect_w, rect_h = _fit_aspect_rect_to_bbox(
+                cur_x, cur_y, cur_w, cur_h, image_w, image_h, target_ar
+            )
+
             if resize_mode == "keep_local_size":
-                out_w = max(1, int(cur_w))
-                out_h = max(1, int(cur_h))
+                out_w = max(1, int(rect_w))
+                out_h = max(1, int(rect_h))
                 resize_output = False
+            elif resize_mode == "upscale_to_target_if_smaller":
+                out_w = int(target_width_effective)
+                out_h = int(target_height_effective)
+                resize_output = rect_w < out_w or rect_h < out_h
             else:
                 out_w = int(target_width_effective)
                 out_h = int(target_height_effective)
@@ -1570,11 +1614,22 @@ class SmartMaskCrop:
              cropped_image, cropped_mask,
              ctc_x, ctc_y, ctc_w, ctc_h) = processor.crop_magic_im(
                 sub_image, sub_mask,
-                cur_x, cur_y, cur_w, cur_h,
-                out_w, out_h,
+                rect_x, rect_y, rect_w, rect_h,
+                rect_w, rect_h,
                 0,
                 downscale_algorithm, upscale_algorithm,
-                resize_output=resize_output)
+                resize_output=False)
+
+            if resize_output:
+                if out_w > ctc_w or out_h > ctc_h:
+                    cropped_image = processor.rescale_i(cropped_image, out_w, out_h, upscale_algorithm)
+                    cropped_mask = processor.rescale_m(cropped_mask, out_w, out_h, upscale_algorithm)
+                else:
+                    cropped_image = processor.rescale_i(cropped_image, out_w, out_h, downscale_algorithm)
+                    cropped_mask = processor.rescale_m(cropped_mask, out_w, out_h, downscale_algorithm)
+            else:
+                out_w = int(ctc_w)
+                out_h = int(ctc_h)
 
             result_stitcher['canvas_to_orig_x'].append(cto_x)
             result_stitcher['canvas_to_orig_y'].append(cto_y)
@@ -1606,6 +1661,8 @@ class SmartMaskCrop:
                 "context_expand": context_expand_effective,
                 "use_region_guidance": bool(use_region_guidance),
                 "resize_mode": resize_mode,
+                "original_crop_width": int(rect_w),
+                "original_crop_height": int(rect_h),
                 "target_width": int(out_w),
                 "target_height": int(out_h),
                 "mask_expand_percent": float(mask_expand_effective),

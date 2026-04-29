@@ -195,7 +195,7 @@
         true,
         0,
         0,
-        "resize_to_target",
+        "upscale_to_target_if_smaller",
         1024,
         1024,
         "bilinear",
