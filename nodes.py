@@ -2055,9 +2055,10 @@ class NB2Florence2RegionSelector:
 
         return self.REGION_QUERY_MAP[region_type]
 
-    def _image_tensor_to_png_bytes(self, image_tensor, max_dimension=None):
+    def _prepare_image_for_upload(self, image_tensor, max_dimension=None):
         image_np = self._normalize_image_array(image_tensor)
         image = Image.fromarray(image_np)
+        original_size = image.size
 
         if max_dimension is not None:
             width, height = image.size
@@ -2079,17 +2080,22 @@ class NB2Florence2RegionSelector:
 
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
-        return buffered.getvalue()
+        return buffered.getvalue(), original_size, image.size
 
     def _upload_image(self, image_tensor, api_key, max_dimension=None):
         fal_client = self._get_fal_client()
         previous_key = os.environ.get("FAL_KEY")
         os.environ["FAL_KEY"] = api_key
         try:
-            return fal_client.upload(
-                self._image_tensor_to_png_bytes(image_tensor, max_dimension=max_dimension),
+            img_bytes, original_size, uploaded_size = self._prepare_image_for_upload(
+                image_tensor,
+                max_dimension=max_dimension,
+            )
+            image_url = fal_client.upload(
+                img_bytes,
                 "image/png",
             )
+            return image_url, original_size, uploaded_size
         finally:
             if previous_key is None:
                 os.environ.pop("FAL_KEY", None)
@@ -2208,6 +2214,72 @@ class NB2Florence2RegionSelector:
                 output.append(bbox)
         return output
 
+    def _scale_polygons_if_needed(
+        self,
+        polygons,
+        original_size,
+        uploaded_size,
+    ):
+        if not polygons:
+            return polygons
+
+        original_w, original_h = original_size
+        uploaded_w, uploaded_h = uploaded_size
+        if (original_w, original_h) == (uploaded_w, uploaded_h):
+            return polygons
+
+        max_x = max(point[0] for polygon in polygons for point in polygon)
+        max_y = max(point[1] for polygon in polygons for point in polygon)
+        if max_x > uploaded_w + 1 or max_y > uploaded_h + 1:
+            return polygons
+
+        scale_x = original_w / float(uploaded_w)
+        scale_y = original_h / float(uploaded_h)
+        logger.info(
+            "Scaling Florence polygon coordinates from uploaded size %sx%s back to original size %sx%s",
+            uploaded_w,
+            uploaded_h,
+            original_w,
+            original_h,
+        )
+        return [
+            [(x * scale_x, y * scale_y) for x, y in polygon]
+            for polygon in polygons
+        ]
+
+    def _scale_bboxes_if_needed(
+        self,
+        bboxes,
+        original_size,
+        uploaded_size,
+    ):
+        if not bboxes:
+            return bboxes
+
+        original_w, original_h = original_size
+        uploaded_w, uploaded_h = uploaded_size
+        if (original_w, original_h) == (uploaded_w, uploaded_h):
+            return bboxes
+
+        max_x = max(bbox[2] for bbox in bboxes)
+        max_y = max(bbox[3] for bbox in bboxes)
+        if max_x > uploaded_w + 1 or max_y > uploaded_h + 1:
+            return bboxes
+
+        scale_x = original_w / float(uploaded_w)
+        scale_y = original_h / float(uploaded_h)
+        logger.info(
+            "Scaling Florence bbox coordinates from uploaded size %sx%s back to original size %sx%s",
+            uploaded_w,
+            uploaded_h,
+            original_w,
+            original_h,
+        )
+        return [
+            (x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y)
+            for x1, y1, x2, y2 in bboxes
+        ]
+
     def _render_mask_from_polygons(self, width, height, polygons, selection_mode):
         if selection_mode == "largest":
             polygons = [max(polygons, key=self._polygon_area)]
@@ -2304,7 +2376,11 @@ class NB2Florence2RegionSelector:
 
             resolved_api_key = self._resolve_api_key(api_key, api_key_env_var)
             query = self._build_query(region_type, custom_text)
-            image_url = self._upload_image(image, resolved_api_key, max_dimension=2048)
+            image_url, original_size, uploaded_size = self._upload_image(
+                image,
+                resolved_api_key,
+                max_dimension=2048,
+            )
             image_np = self._normalize_image_array(image[0:1])
             height, width = image_np.shape[:2]
 
@@ -2319,6 +2395,11 @@ class NB2Florence2RegionSelector:
 
             segmentation_result = self._call_segmentation(image_url, query, resolved_api_key)
             polygons = self._coerce_polygon_entries(segmentation_result)
+            polygons = self._scale_polygons_if_needed(
+                polygons,
+                original_size,
+                uploaded_size,
+            )
             if polygons:
                 mask_uint8 = self._render_mask_from_polygons(
                     width, height, polygons, selection_mode
@@ -2328,6 +2409,11 @@ class NB2Florence2RegionSelector:
             if mask_uint8 is None:
                 grounding_result = self._call_grounding(image_url, query, resolved_api_key)
                 bboxes = self._coerce_bbox_entries(grounding_result)
+                bboxes = self._scale_bboxes_if_needed(
+                    bboxes,
+                    original_size,
+                    uploaded_size,
+                )
                 if not bboxes:
                     raise RuntimeError(
                         "Florence returned no polygons and no bounding boxes for this region."
@@ -2358,6 +2444,8 @@ class NB2Florence2RegionSelector:
                 "selection_mode": selection_mode,
                 "padding_percent": padding_percent,
                 "api_key_source": "direct_input" if (api_key or "").strip() else "environment",
+                "original_size": {"width": int(original_size[0]), "height": int(original_size[1])},
+                "uploaded_size": {"width": int(uploaded_size[0]), "height": int(uploaded_size[1])},
                 "bbox": {
                     "x1": int(padded_bbox[0]),
                     "y1": int(padded_bbox[1]),
