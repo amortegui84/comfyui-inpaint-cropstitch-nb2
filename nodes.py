@@ -862,13 +862,18 @@ def _fit_nb2_rect_to_mask(mask_2d: torch.Tensor, image_w: int, image_h: int,
 
 def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
                              processor: ProcessorLogic,
-                             node_name: str) -> tuple[torch.Tensor, torch.Tensor, str]:
+                             node_name: str,
+                             depad_florence: bool = True) -> tuple[torch.Tensor, torch.Tensor, str]:
     """
     Make a MASK tensor match an IMAGE tensor in rank, batch, and spatial size.
 
     Florence / segmentation nodes may emit a valid MASK tensor whose width and
     height do not match the source IMAGE. For crop logic that derives a bbox
     from the mask, that mismatch shifts the selected region.
+
+    depad_florence: when True (default), detects the square letterbox padding
+    that Florence2 adds internally and crops it out before resizing, so the
+    bbox lands on the correct region in non-square images.
     """
     note_parts = []
 
@@ -898,6 +903,35 @@ def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
     target_h, target_w = image.shape[1], image.shape[2]
     if mask.shape[1] != target_h or mask.shape[2] != target_w:
         old_h, old_w = mask.shape[1], mask.shape[2]
+
+        # Florence2 letterbox correction:
+        # Florence2 pads images to a square before processing. The output mask
+        # is in that padded-square space. Naively resizing to the original image
+        # dimensions stretches the padding into the image area and shifts the
+        # detected region. Detect and remove the padding first.
+        if depad_florence and old_h > 0 and old_w > 0:
+            mask_ar   = old_w / old_h
+            target_ar = target_w / target_h
+            if abs(mask_ar - target_ar) > 0.05 and abs(mask_ar - 1.0) < 0.05:
+                if target_ar > 1.0:
+                    # Landscape original → Florence padded top/bottom
+                    content_h = max(1, round(old_h * target_h / target_w))
+                    pad_y     = max(0, (old_h - content_h) // 2)
+                    content_h = min(content_h, old_h - pad_y)
+                    mask = mask[:, pad_y : pad_y + content_h, :]
+                    note_parts.append(
+                        f"Florence depad top/bottom y[{pad_y}:{pad_y+content_h}/{old_h}]"
+                    )
+                else:
+                    # Portrait original → Florence padded left/right
+                    content_w = max(1, round(old_w * target_w / target_h))
+                    pad_x     = max(0, (old_w - content_w) // 2)
+                    content_w = min(content_w, old_w - pad_x)
+                    mask = mask[:, :, pad_x : pad_x + content_w]
+                    note_parts.append(
+                        f"Florence depad left/right x[{pad_x}:{pad_x+content_w}/{old_w}]"
+                    )
+
         mask = processor.rescale_m(mask, target_w, target_h, "nearest")
         note_parts.append(
             f"mask resized {old_w}x{old_h} -> {target_w}x{target_h}"
@@ -1018,6 +1052,14 @@ class NB2SmartRegionMask:
                 "crop_scale": ("FLOAT", {
                     "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.01,
                     "tooltip": "Additional scale multiplier applied after aspect-ratio fitting."}),
+                "depad_florence": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": (
+                        "Remove Florence2's internal square letterbox padding before "
+                        "resizing the mask. Keep True when the mask comes from "
+                        "Florence2Run (kijai). Disable only if your mask is already "
+                        "at the exact source image resolution."
+                    )}),
             }
         }
 
@@ -1042,12 +1084,13 @@ class NB2SmartRegionMask:
     )
 
     def generate_from_region(self, image, region_mask, aspect_ratio, resolution,
-                             padding_percent, crop_scale):
+                             padding_percent, crop_scale, depad_florence=True):
         image = image.clone()
         region_mask = region_mask.clone()
         processor = CPUProcessorLogic()
         region_mask, image, mask_note = _normalize_mask_to_image(
-            region_mask, image, processor, "NB2SmartRegionMask"
+            region_mask, image, processor, "NB2SmartRegionMask",
+            depad_florence=depad_florence
         )
 
         B, H, W, _ = image.shape
@@ -1150,6 +1193,14 @@ class SmartMaskCrop:
                                          "box", "hamming"], {"default": "bicubic"}),
                 "device_mode": (["gpu (much faster)", "cpu (compatible)"],
                                 {"default": "gpu (much faster)"}),
+                "depad_florence": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": (
+                        "Remove Florence2's internal square letterbox padding before "
+                        "resizing the mask. Keep True when the mask comes from "
+                        "Florence2Run (kijai). Disable only if your mask is already "
+                        "at the exact source image resolution."
+                    )}),
             }
         }
 
@@ -1164,7 +1215,7 @@ class SmartMaskCrop:
 
     def smart_mask_crop(self, image, mask, context_expand, resize_mode,
                         target_width, target_height, downscale_algorithm,
-                        upscale_algorithm, device_mode):
+                        upscale_algorithm, device_mode, depad_florence=True):
         image = image.clone()
         mask = mask.clone()
         if device_mode == "gpu (much faster)":
@@ -1176,7 +1227,8 @@ class SmartMaskCrop:
             device = torch.device("cpu")
             processor = CPUProcessorLogic()
         mask, image, mask_note = _normalize_mask_to_image(
-            mask, image, processor, "SmartMaskCrop"
+            mask, image, processor, "SmartMaskCrop",
+            depad_florence=depad_florence
         )
 
         result_stitcher = {
