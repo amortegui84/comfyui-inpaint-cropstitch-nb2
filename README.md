@@ -265,6 +265,7 @@ Additional sample workflows for the new smart-region flows:
 - [01_nb2_smart_region_face_roundtrip.json](workflows/01_nb2_smart_region_face_roundtrip.json)
 - [02_local_mask_edit_face_gpt_image2.json](workflows/02_local_mask_edit_face_gpt_image2.json)
 - [03_local_mask_edit_object_template.json](workflows/03_local_mask_edit_object_template.json)
+- [04_nb2_upper_body_template.json](workflows/04_nb2_upper_body_template.json)
 
 ## Installation
 
