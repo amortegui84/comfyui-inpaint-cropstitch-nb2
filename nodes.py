@@ -31,7 +31,6 @@ Intended workflow
        | result image
 """
 
-import base64
 import comfy.utils
 import comfy.model_management
 import io
@@ -91,7 +90,7 @@ REGION_ASPECT_RATIO_HINTS = {
 }
 
 EDIT_SIZE_BY_ASPECT_RATIO = {
-    "16:9": "1536x1024",
+    "16:9": "1920x1080",
     "9:16": "1024x1536",
     "1:1": "1024x1024",
 }
@@ -2642,19 +2641,13 @@ class NB2Florence2RegionSelector:
 
 class NB2OpenAIImageEdit:
     """
-    Edit an image with OpenAI's external Images API using an optional mask.
+    Edit an image with GPT Image 2 through FAL using an optional mask.
     """
 
-    MODEL_OPTIONS = [
-        "gpt-image-2",
-        "chatgpt-image-latest",
-        "gpt-image-1.5",
-        "gpt-image-1",
-        "gpt-image-1-mini",
-    ]
+    MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
     QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
-    SIZE_MODE_OPTIONS = ["auto_from_region", "manual"]
-    SIZE_OPTIONS = ["auto", "1024x1024", "1024x1536", "1536x1024"]
+    SIZE_MODE_OPTIONS = ["auto_from_input", "auto_from_region", "manual"]
+    SIZE_OPTIONS = ["auto", "1024x768", "1024x1024", "1024x1536", "1920x1080", "2560x1440", "3840x2160"]
     BACKGROUND_OPTIONS = ["auto", "opaque", "transparent"]
     FORMAT_OPTIONS = ["png", "webp", "jpeg"]
     MODERATION_OPTIONS = ["auto", "low"]
@@ -2670,7 +2663,7 @@ class NB2OpenAIImageEdit:
                 }),
                 "model": (cls.MODEL_OPTIONS, {"default": "gpt-image-2"}),
                 "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
-                "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_region"}),
+                "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_input"}),
                 "size": (cls.SIZE_OPTIONS, {"default": "auto"}),
                 "background": (cls.BACKGROUND_OPTIONS, {"default": "auto"}),
                 "output_format": (cls.FORMAT_OPTIONS, {"default": "png"}),
@@ -2679,12 +2672,22 @@ class NB2OpenAIImageEdit:
                 "api_key": ("STRING", {
                     "multiline": False,
                     "default": "",
-                    "placeholder": "Optional. Leave blank to use OPENAI_API_KEY",
+                    "placeholder": "Optional. Leave blank to use FAL_KEY",
                 }),
                 "api_key_env_var": ("STRING", {
                     "multiline": False,
+                    "default": "FAL_KEY",
+                    "placeholder": "FAL environment variable fallback",
+                }),
+                "openai_api_key": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "Optional. Leave blank to use OPENAI_API_KEY",
+                }),
+                "openai_api_key_env_var": ("STRING", {
+                    "multiline": False,
                     "default": "OPENAI_API_KEY",
-                    "placeholder": "Environment variable fallback",
+                    "placeholder": "OpenAI environment variable fallback",
                 }),
             },
             "optional": {
@@ -2699,17 +2702,25 @@ class NB2OpenAIImageEdit:
     FUNCTION = "edit_image"
     CATEGORY = "inpaint/api"
     DESCRIPTION = (
-        "Edits an image through OpenAI's external Images API. "
-        "Supports optional masks and region-aware automatic output sizing."
+        "Edits an image through FAL's GPT Image 2 edit endpoint. "
+        "Supports optional masks and safe auto sizing from the input crop."
     )
 
-    def _looks_like_api_key(self, value):
+    def _looks_like_openai_api_key(self, value):
         candidate = _coerce_text_value(value)
         if not candidate:
             return False
         if len(candidate) < 20:
             return False
         return candidate.startswith("sk-") or candidate.startswith("org-") or candidate.startswith("proj_")
+
+    def _looks_like_fal_api_key(self, value):
+        candidate = _coerce_text_value(value)
+        if not candidate:
+            return False
+        if len(candidate) < 24:
+            return False
+        return ":" in candidate or candidate.startswith("fal_")
 
     def _looks_like_env_var_name(self, value):
         candidate = _coerce_text_value(value)
@@ -2719,67 +2730,46 @@ class NB2OpenAIImageEdit:
             return False
         return candidate.replace("_", "a").isalnum()
 
-    def _resolve_api_key(self, api_key, api_key_env_var):
+    def _resolve_api_key(self, api_key, api_key_env_var, looks_like_key, default_env_name, label):
         direct_key = _coerce_text_value(api_key)
         if direct_key:
-            if self._looks_like_env_var_name(direct_key) and not self._looks_like_api_key(direct_key):
+            if self._looks_like_env_var_name(direct_key) and not looks_like_key(direct_key):
                 env_key = os.getenv(direct_key, "").strip()
                 if env_key:
                     logger.warning(
-                        "OpenAI image node received an environment variable name in api_key; resolving it from the environment."
+                        "%s image node received an environment variable name in api_key; resolving it from the environment.",
+                        label,
                     )
                     return env_key, f"environment:{direct_key}"
             return direct_key, "direct_input"
 
-        env_name = _coerce_text_value(api_key_env_var) or "OPENAI_API_KEY"
-        if self._looks_like_api_key(env_name):
+        env_name = _coerce_text_value(api_key_env_var) or default_env_name
+        if looks_like_key(env_name):
             logger.warning(
-                "OpenAI image node received an API key in api_key_env_var; using it as a direct key."
+                "%s image node received an API key in api_key_env_var; using it as a direct key.",
+                label,
             )
             return env_name, "api_key_env_var_direct_input"
 
         if not self._looks_like_env_var_name(env_name):
             logger.warning(
-                "OpenAI image node received an invalid api_key_env_var value %r; falling back to OPENAI_API_KEY.",
+                "%s image node received an invalid api_key_env_var value %r; falling back to %s.",
+                label,
                 api_key_env_var,
+                default_env_name,
             )
-            env_name = "OPENAI_API_KEY"
+            env_name = default_env_name
 
         env_key = os.getenv(env_name, "").strip()
         if env_key:
             return env_key, f"environment:{env_name}"
 
         raise ValueError(
-            f"Missing OpenAI API key. Paste it into api_key or set the environment variable {env_name}."
+            f"Missing {label} API key. Paste it into api_key or set the environment variable {env_name}."
         )
 
-    def _normalize_image_array(self, image):
-        if isinstance(image, torch.Tensor):
-            image_np = image.detach().cpu().numpy()
-        else:
-            image_np = np.asarray(image)
-
-        if image_np.ndim == 4 and image_np.shape[0] == 1:
-            image_np = image_np[0]
-        elif image_np.ndim == 3 and image_np.shape[0] in (3, 4):
-            image_np = np.transpose(image_np, (1, 2, 0))
-
-        if image_np.dtype != np.uint8:
-            if image_np.max() <= 1.0:
-                image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
-            else:
-                image_np = np.clip(image_np, 0, 255).astype(np.uint8)
-
-        if image_np.ndim == 2:
-            image_np = np.stack([image_np] * 3, axis=-1)
-
-        if image_np.shape[-1] == 1:
-            image_np = np.repeat(image_np, 3, axis=-1)
-
-        return image_np
-
     def _image_tensor_to_png_bytes(self, image_tensor):
-        image_np = self._normalize_image_array(image_tensor)
+        image_np = NB2Florence2RegionSelector()._normalize_image_array(image_tensor)
         mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
         image = Image.fromarray(image_np[..., :4] if mode == "RGBA" else image_np[..., :3], mode=mode)
         buf = io.BytesIO()
@@ -2787,7 +2777,7 @@ class NB2OpenAIImageEdit:
         return buf.getvalue(), image.size
 
     def _mask_tensor_to_png_bytes(self, mask_image, target_size):
-        mask_np = self._normalize_image_array(mask_image)
+        mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
         if mask_np.shape[-1] >= 3:
             mask_gray = np.max(mask_np[..., :3], axis=-1).astype(np.uint8)
         else:
@@ -2802,7 +2792,7 @@ class NB2OpenAIImageEdit:
         return buf.getvalue()
 
     def _mask_bbox(self, mask_image):
-        mask_np = self._normalize_image_array(mask_image)
+        mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
         if mask_np.shape[-1] >= 3:
             mask_gray = np.max(mask_np[..., :3], axis=-1)
         else:
@@ -2813,6 +2803,8 @@ class NB2OpenAIImageEdit:
         return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
 
     def _resolve_size(self, size_mode, size, region_info, mask_image):
+        if size_mode == "auto_from_input":
+            return "auto", "input_image"
         if size_mode != "auto_from_region":
             return size, "manual"
 
@@ -2834,9 +2826,70 @@ class NB2OpenAIImageEdit:
 
         return size, "manual_fallback"
 
-    def _decode_image_result(self, image_b64):
-        image_bytes = base64.b64decode(image_b64)
-        pil_image = Image.open(io.BytesIO(image_bytes))
+    def _format_image_size(self, resolved_size):
+        size_value = _coerce_text_value(resolved_size)
+        if not size_value or size_value == "auto":
+            return "auto"
+        match = re.fullmatch(r"(\d+)x(\d+)", size_value)
+        if not match:
+            raise ValueError(f"Unsupported image size value: {resolved_size}")
+        return {
+            "width": int(match.group(1)),
+            "height": int(match.group(2)),
+        }
+
+    def _get_fal_client(self):
+        try:
+            import fal_client
+        except ImportError as e:
+            raise RuntimeError(
+                "fal-client is not installed. Install it in ComfyUI's Python environment."
+            ) from e
+        return fal_client
+
+    def _upload_to_fal(self, data_bytes, mime_type, fal_api_key):
+        fal_client = self._get_fal_client()
+        previous_key = os.environ.get("FAL_KEY")
+        os.environ["FAL_KEY"] = fal_api_key
+        try:
+            return fal_client.upload(data_bytes, mime_type)
+        finally:
+            if previous_key is None:
+                os.environ.pop("FAL_KEY", None)
+            else:
+                os.environ["FAL_KEY"] = previous_key
+
+    def _call_fal(self, endpoint, arguments, fal_api_key):
+        fal_client = self._get_fal_client()
+        previous_key = os.environ.get("FAL_KEY")
+        os.environ["FAL_KEY"] = fal_api_key
+        try:
+            result = fal_client.run(endpoint, arguments=arguments)
+            logger.debug("FAL GPT Image response from %s: %s", endpoint, json.dumps(result))
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Failed to call FAL endpoint {endpoint}: {str(e)}") from e
+        finally:
+            if previous_key is None:
+                os.environ.pop("FAL_KEY", None)
+            else:
+                os.environ["FAL_KEY"] = previous_key
+
+    def _extract_result_image_url(self, result):
+        if not isinstance(result, dict):
+            return None
+        candidates = result.get("images") or result.get("data") or []
+        for item in candidates:
+            if isinstance(item, dict):
+                url = _coerce_text_value(item.get("url") or item.get("image_url"))
+                if url:
+                    return url
+        return _coerce_text_value(result.get("image_url"))
+
+    def _decode_image_result(self, image_url):
+        response = requests.get(image_url, timeout=300)
+        response.raise_for_status()
+        pil_image = Image.open(io.BytesIO(response.content))
         pil_image.load()
         if pil_image.mode not in ("RGB", "RGBA"):
             pil_image = pil_image.convert("RGBA" if "A" in pil_image.getbands() else "RGB")
@@ -2859,66 +2912,61 @@ class NB2OpenAIImageEdit:
         moderation,
         api_key,
         api_key_env_var,
+        openai_api_key="",
+        openai_api_key_env_var="OPENAI_API_KEY",
         mask_image=None,
         image_2=None,
         region_info="",
     ):
         try:
-            resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
+            fal_api_key, fal_api_key_source = self._resolve_api_key(
+                api_key,
+                api_key_env_var,
+                self._looks_like_fal_api_key,
+                "FAL_KEY",
+                "FAL",
+            )
+            resolved_openai_api_key, openai_api_key_source = self._resolve_api_key(
+                openai_api_key,
+                openai_api_key_env_var,
+                self._looks_like_openai_api_key,
+                "OPENAI_API_KEY",
+                "OpenAI",
+            )
             resolved_size, size_source = self._resolve_size(size_mode, size, region_info, mask_image)
 
-            if model == "gpt-image-2" and background == "transparent":
-                raise ValueError("gpt-image-2 does not currently support background=transparent.")
-
             image_1_bytes, image_size = self._image_tensor_to_png_bytes(image_1)
-            files = [("image[]", ("image_1.png", image_1_bytes, "image/png"))]
+            image_urls = [self._upload_to_fal(image_1_bytes, "image/png", fal_api_key)]
             if image_2 is not None:
                 image_2_bytes, _ = self._image_tensor_to_png_bytes(image_2)
-                files.append(("image[]", ("image_2.png", image_2_bytes, "image/png")))
+                image_urls.append(self._upload_to_fal(image_2_bytes, "image/png", fal_api_key))
 
+            mask_url = None
             if mask_image is not None:
                 mask_bytes = self._mask_tensor_to_png_bytes(mask_image, image_size)
-                files.append(("mask", ("mask.png", mask_bytes, "image/png")))
+                mask_url = self._upload_to_fal(mask_bytes, "image/png", fal_api_key)
 
-            data = {
-                "model": model,
+            arguments = {
                 "prompt": _coerce_text_value(prompt),
+                "image_urls": image_urls,
+                "openai_api_key": resolved_openai_api_key,
                 "quality": quality,
-                "size": resolved_size,
+                "image_size": self._format_image_size(resolved_size),
                 "background": background,
                 "output_format": output_format,
                 "moderation": moderation,
             }
+            if mask_url:
+                arguments["mask_image_url"] = mask_url
             if output_format in ("jpeg", "webp"):
-                data["output_compression"] = str(int(output_compression))
+                arguments["output_compression"] = int(output_compression)
 
-            response = requests.post(
-                "https://api.openai.com/v1/images/edits",
-                headers={"Authorization": f"Bearer {resolved_api_key}"},
-                data=data,
-                files=files,
-                timeout=300,
-            )
+            result = self._call_fal(model, arguments, fal_api_key)
+            image_url = self._extract_result_image_url(result)
+            if not image_url:
+                raise RuntimeError("FAL GPT Image edit returned no output image URL.")
 
-            try:
-                payload = response.json()
-            except Exception:
-                payload = None
-
-            if not response.ok:
-                message = None
-                if isinstance(payload, dict):
-                    message = payload.get("error", {}).get("message")
-                raise RuntimeError(message or f"OpenAI Images API request failed with status {response.status_code}.")
-
-            if not isinstance(payload, dict) or not payload.get("data"):
-                raise RuntimeError("OpenAI Images API returned no image data.")
-
-            image_b64 = payload["data"][0].get("b64_json")
-            if not image_b64:
-                raise RuntimeError("OpenAI Images API returned an image without b64_json.")
-
-            output_image = self._decode_image_result(image_b64)
+            output_image = self._decode_image_result(image_url)
             info = {
                 "model": model,
                 "quality": quality,
@@ -2928,11 +2976,12 @@ class NB2OpenAIImageEdit:
                 "background": background,
                 "output_format": output_format,
                 "moderation": moderation,
-                "api_key_source": api_key_source,
+                "fal_api_key_source": fal_api_key_source,
+                "openai_api_key_source": openai_api_key_source,
                 "mask_used": mask_image is not None,
                 "reference_image_used": image_2 is not None,
-                "request_id": response.headers.get("x-request-id", ""),
-                "usage": payload.get("usage"),
+                "output_image_url": image_url,
+                "usage": result.get("usage") if isinstance(result, dict) else None,
             }
             return (output_image, json.dumps(info))
         except Exception as e:

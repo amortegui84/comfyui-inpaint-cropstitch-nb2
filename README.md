@@ -128,24 +128,26 @@ NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> NB2 Smart Region -
 
 ### OpenAI GPT Image Edit
 
-External OpenAI image editor integrated into this repo. It calls `POST /v1/images/edits`, accepts an optional mask, and can auto-pick portrait, square, or landscape output sizes from Florence region metadata.
+External GPT Image 2 editor integrated into this repo through FAL. It calls `openai/gpt-image-2/edit`, accepts an optional mask, and can either preserve the input crop with `auto` or use a documented preset size when you explicitly request it.
 
 | Input | Type | Description |
 |---|---|---|
 | image_1 | IMAGE | Base image to edit |
 | prompt | STRING | Edit instruction |
-| model | choice | `gpt-image-2`, `chatgpt-image-latest`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini` |
+| model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
-| size_mode | choice | `auto_from_region` or `manual` |
-| size | choice | `auto`, `1024x1024`, `1024x1536`, `1536x1024` |
+| size_mode | choice | `auto_from_input`, `auto_from_region`, or `manual` |
+| size | choice | `auto`, `1024x768`, `1024x1024`, `1024x1536`, `1920x1080`, `2560x1440`, `3840x2160` |
 | background | choice | `auto`, `opaque`, `transparent` |
 | output_format | choice | `png`, `webp`, `jpeg` |
 | output_compression | INT | Used for `webp` and `jpeg` outputs |
 | moderation | choice | `auto` or `low` |
-| api_key | STRING | Optional direct API key input |
-| api_key_env_var | STRING | Env var fallback, default `OPENAI_API_KEY` |
+| api_key | STRING | Optional direct FAL API key input |
+| api_key_env_var | STRING | FAL env var fallback, default `FAL_KEY` |
+| openai_api_key | STRING | Optional direct OpenAI API key input passed through to FAL |
+| openai_api_key_env_var | STRING | OpenAI env var fallback, default `OPENAI_API_KEY` |
 | mask_image | IMAGE | Optional mask image. If connected, the node converts it to an alpha mask automatically |
-| region_info | STRING | Optional Florence `info` output used for automatic size selection |
+| region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
 
 Outputs: `images`, `info`
 
@@ -153,6 +155,11 @@ Typical flow:
 ```
 NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -> Smart Mask Stitch
 ```
+
+Recommended default:
+
+- Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
+- Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
 
 ---
 
@@ -316,7 +323,7 @@ Restart ComfyUI after updating.
 
 ### Python dependencies
 
-This repo now includes external Florence-2 and OpenAI image-edit nodes. They need `fal-client` plus the normal HTTP/image dependencies in the same Python environment ComfyUI uses.
+This repo now includes external Florence-2 and GPT Image edit nodes through FAL. They need `fal-client` plus the normal HTTP/image dependencies in the same Python environment ComfyUI uses.
 
 ```bash
 python -m pip install fal-client requests pillow numpy

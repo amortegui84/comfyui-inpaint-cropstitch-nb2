@@ -246,14 +246,16 @@
       },
       "widgets_values": [
         "Retouch only the face area. Keep identity, framing, pose, lighting, and background unchanged. Improve facial details naturally.",
-        "gpt-image-2",
+        "openai/gpt-image-2/edit",
         "high",
-        "auto_from_region",
+        "auto_from_input",
         "auto",
         "auto",
         "png",
         90,
         "auto",
+        "",
+        "FAL_KEY",
         "",
         "OPENAI_API_KEY"
       ]
