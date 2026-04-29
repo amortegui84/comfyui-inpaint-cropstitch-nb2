@@ -1,187 +1,176 @@
 # ComfyUI-Inpaint-CropStitch-NB2
 
-Fork of [ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch) by **lquesada**, adapted for post-production retouching workflows using **Nano Banana 2**.
+Fork of [ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch) by `lquesada`, adapted for post-production retouching workflows using Nano Banana 2 and local masked editing flows.
 
-> All credits for the original crop/stitch engine go to [lquesada](https://github.com/lquesada).
-
----
+All credits for the original crop/stitch engine go to [lquesada](https://github.com/lquesada).
 
 ## Demo
 
 [![Demo video](https://img.youtube.com/vi/aqXyEMK6grk/maxresdefault.jpg)](https://www.youtube.com/watch?v=aqXyEMK6grk)
 
-## Why these nodes exist
+## Why These Nodes Exist
 
-Traditional inpainting workflows require a mask — you draw the area you want to regenerate and the model fills it in. **Nano Banana 2 is a generation model, not an inpainting model**: it does not accept a mask. It takes a clean image and generates a new one at a fixed resolution.
+Traditional inpainting workflows require a mask: you draw the area you want to regenerate and the model fills it in.
 
-These nodes bridge that gap. The idea is to use NB2 as a **post-production retouching tool**: isolate a region of an existing image, send it to NB2 for regeneration at the best possible quality, and stitch the result seamlessly back onto the original canvas — all without ever drawing a mask by hand.
+Nano Banana 2 is different. It is a generation model, not a true inpainting model. It does not accept a mask directly. It takes a clean image crop and generates a new image at a fixed resolution.
 
-This makes it possible to automate the retouching of images through NB2 in a repeatable, non-destructive pipeline.
+These nodes bridge that gap in two ways:
 
----
+1. `NB2 crop/stitch path`
+   Use a semantic region or manual region to define a rectangular crop, generate only that crop, and stitch it back into the original image.
 
-## Resolution design
+2. `local mask crop/stitch path`
+   Use a semantic mask to crop a focused local edit region, run a true mask-based editor such as GPT Image, then stitch the result back into the original image.
+
+## Resolution Design
 
 Nano Banana 2 produces images at fixed resolutions. These nodes are built around those exact sizes:
 
 | Aspect ratio | 1K | 2K | 4K |
 |---|---|---|---|
-| 16:9 | 1376 × 768 | 2752 × 1536 | 5504 × 3072 |
-| 9:16 | 768 × 1376 | 1536 × 2752 | 3072 × 5504 |
-| 1:1  | 1024 × 1024 | 2048 × 2048 | 4096 × 4096 |
+| 16:9 | 1376 x 768 | 2752 x 1536 | 5504 x 3072 |
+| 9:16 | 768 x 1376 | 1536 x 2752 | 3072 x 5504 |
+| 1:1 | 1024 x 1024 | 2048 x 2048 | 4096 x 4096 |
 
-**Choosing the right resolution:**
+Choosing the right resolution:
 
-- Use **1K** for small touch-ups, faces, or objects that occupy a limited portion of the frame.
-- Use **2K** for medium-sized regions — a good balance between detail and processing time.
-- Use **4K** when you need maximum quality, or when the region to retouch is large relative to the original image.
+- Use `1K` for small touch-ups, faces, or small objects.
+- Use `2K` for medium-size retouching regions.
+- Use `4K` when you need maximum detail or the retouch area is large.
 
-**Mixing generation resolution and crop size:**
+Mixing generation resolution and crop size is valid. You can generate at a higher resolution than the crop area and let the stitch step downscale the result cleanly before compositing.
 
-The crop size on the original image (`crop_width`) and the NB2 generation resolution are independent. You can generate at a higher resolution than the crop area — NB2 will produce finer detail and the stitch will downscale it with a quality algorithm before compositing. For example:
+Example:
 
+```text
+crop_width = 2752  (2K-sized area on the original)
+generate at 4K     -> NB2 outputs 5504x3072
+stitch             -> downscales 5504x3072 to 2752x1536, composites back
 ```
-crop_width = 2752  (2K area on the original)
-generate at 4K     → NB2 outputs 5504×3072
-stitch             → downscales 5504×3072 → 2752×1536, composites
-```
-
-This is valid and safe. The stitch always detects whether the generated image is larger or smaller than the crop region and applies the appropriate scaling algorithm automatically.
-
----
 
 ## Nodes
 
-### 🎯 NB2 Mask Generator
+### NB2 Mask Generator
 
-Interactive node that generates a rectangular mask at an exact position on the original image, with an aspect ratio that matches a Nano Banana 2 output resolution. No manual mask drawing needed.
+Interactive node that generates a rectangular mask at an exact position on the original image, with an aspect ratio that matches a Nano Banana 2 output resolution.
 
-**Interactive canvas widget** — connect an image and the preview loads immediately (no re-run needed):
-
-| Control | Action |
-|---|---|
-| Drag | Move crop centre → updates `center_x` / `center_y` |
-| Scroll wheel | Resize crop area → updates `crop_width` |
-| Arrow keys | Nudge centre 1 px |
-| Shift + Arrow | Nudge centre 10 px |
-
-When you change `resolution` or `aspect_ratio`, `crop_width` is automatically set to the NB2 output width for that selection (clamped to the image width), so the rectangle immediately shows the real capture area.
-
-**Inputs**
+Inputs:
 
 | Name | Type | Description |
 |---|---|---|
-| image | IMAGE | Source image (used for dimensions and canvas preview) |
-| aspect_ratio | choice | 16:9 · 9:16 · 1:1 |
-| resolution | choice | 1K · 2K · 4K |
-| center_x | INT | Horizontal centre of the crop rectangle (pixels) |
-| center_y | INT | Vertical centre of the crop rectangle (pixels) |
-| crop_width | INT | Width of the rectangle on the source image. Height is computed from the aspect ratio. |
+| image | IMAGE | Source image used for dimensions and preview |
+| aspect_ratio | choice | `16:9`, `9:16`, `1:1` |
+| resolution | choice | `1K`, `2K`, `4K` |
+| center_x | INT | Horizontal center of the crop rectangle |
+| center_y | INT | Vertical center of the crop rectangle |
+| crop_width | INT | Width of the crop rectangle on the source image |
 
-**Outputs** — `MASK`, `nb2_width (INT)`, `nb2_height (INT)`, `preview (IMAGE)`
+Outputs:
 
----
+- `mask`
+- `nb2_width`
+- `nb2_height`
+- `preview_image`
 
-### ✂️ NB2 Crop
-
-Crops the source image around the masked region and scales the result to the **exact NB2 resolution**, so Nano Banana 2 receives a pixel-perfect input regardless of the original image size.
-
-Set `aspect_ratio` and `resolution` to the **same values** you chose in NB2 Mask Generator. The node computes the target dimensions internally — no INT wiring required.
-
-**Inputs**
-
-| Name | Type | Description |
-|---|---|---|
-| image | IMAGE | Original source image |
-| mask | MASK | Mask from NB2 Mask Generator (optional — full image if not connected) |
-| aspect_ratio | choice | 16:9 · 9:16 · 1:1 — must match NB2 Mask Generator |
-| resolution | choice | 1K · 2K · 4K — must match NB2 Mask Generator |
-| downscale_algorithm | choice | Algorithm used when the crop is larger than the target |
-| upscale_algorithm | choice | Algorithm used when the crop is smaller than the target |
-
-**Outputs** — `stitcher (STITCHER)`, `cropped_image (IMAGE)`, `cropped_mask (MASK)`
-
----
-
-### ✂️ NB2 Stitch
-
-Composites the NB2-generated image back onto the original canvas.
-
-The stitch **automatically handles any size mismatch** between the generated image and the crop region. Whether NB2 produced a 1K, 2K, or 4K image, the stitch detects the difference and applies the correct scaling algorithm (upscale or downscale) before compositing. You do not need to pre-resize the generated image.
-
-**Blending behaviour:**
-
-- **RGB input** — `edge_feather_percent` generates a smoothstep gradient from 0 at the crop boundary to 1 a few pixels inside, producing a natural blend. Set to `0` for a hard cut.
-- **RGBA input** — the alpha channel is used directly as the blend mask; `edge_feather_percent` is ignored. This avoids double-feathering. Use `NB2 Add Alpha` upstream if you want custom soft-edge control.
-
-> For the standard workflow you do **not** need `NB2 Add Alpha`. Just set `edge_feather_percent > 0` on the Stitch node. `NB2 Add Alpha` is only needed if you want to pass RGBA to a different compositor.
-
-**Inputs**
-
-| Name | Type | Description |
-|---|---|---|
-| stitcher | STITCHER | Coordinate data from NB2 Crop |
-| inpainted_image | IMAGE | RGB or RGBA output from Nano Banana 2 |
-| edge_feather_percent | FLOAT | Edge blend ramp width as % of crop size (0 = hard cut) |
-
-**Outputs** — `IMAGE`
-
----
-
-### 🔲 NB2 Add Alpha
-
-Converts an RGB image to RGBA by generating a feathered alpha channel. Useful when you want soft-edge RGBA output for a compositor other than NB2 Stitch.
-
-For the standard NB2 retouching workflow, this node is not needed — use `edge_feather_percent` on the Stitch instead.
-
-**Inputs**
-
-| Name | Type | Description |
-|---|---|---|
-| image | IMAGE | RGB (or RGBA) input |
-| feather_percent | FLOAT | Edge fade width as % of image size (0 = hard rectangular alpha) |
-
-**Outputs** — `IMAGE` (RGBA)
-
----
-
-### 🧠 NB2 Smart Region
+### NB2 Smart Region
 
 Automatic NB2 rectangle fitting from a semantic mask.
 
 Use this when you already have a region mask from another node such as:
+
 - Florence-2 Smart Region Selector
-- SAM / segmentation nodes
+- SAM or segmentation nodes
 - any external object-selection pipeline
 
-**Inputs**
+Inputs:
 
 | Name | Type | Description |
 |---|---|---|
 | image | IMAGE | Source image |
 | region_mask | MASK | Semantic mask to fit |
-| aspect_ratio | choice | 16:9 · 9:16 · 1:1 |
-| resolution | choice | 1K · 2K · 4K |
+| aspect_ratio | choice | `16:9`, `9:16`, `1:1` |
+| resolution | choice | `1K`, `2K`, `4K` |
 | padding_percent | FLOAT | Expands the detected region before rectangle fitting |
 | crop_scale | FLOAT | Additional scale multiplier after fitting |
 
-**Outputs** — `MASK`, `nb2_width (INT)`, `nb2_height (INT)`, `preview (IMAGE)`, `center_x`, `center_y`, `crop_width`, `crop_height`, `info`
+Outputs:
 
-**Recommended usage**
+- `mask`
+- `nb2_width`
+- `nb2_height`
+- `preview_image`
+- `center_x`
+- `center_y`
+- `crop_width`
+- `crop_height`
+- `info`
 
-- `Florence-2 Smart Region Selector -> mask -> NB2 Smart Region -> NB2 Crop -> generation -> NB2 Stitch`
-- For masked editing instead of NB2 crop workflows, use the selector's `mask_image` output directly with GPT Image editing nodes.
+Notes:
+
 - `NB2 Smart Region` accepts `MASK` tensors in either `[H, W]` or `[B, H, W]` form.
+- This node is for the rectangular NB2 workflow, not for exact mask editing.
 
----
+### NB2 Crop
 
-### 🪄 Smart Mask Crop
+Crops the source image around the mask region and scales the result to the exact NB2 resolution.
+
+Inputs:
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | Original source image |
+| mask | MASK | Mask from `NB2 Mask Generator` or `NB2 Smart Region` |
+| aspect_ratio | choice | Must match the upstream NB2 region node |
+| resolution | choice | Must match the upstream NB2 region node |
+| context_extend_factor | FLOAT | Extra context growth before aspect-ratio fit |
+| downscale_algorithm | choice | Used when crop is larger than target |
+| upscale_algorithm | choice | Used when crop is smaller than target |
+| device_mode | choice | CPU or GPU execution |
+
+Outputs:
+
+- `stitcher`
+- `cropped_image`
+- `cropped_mask`
+
+### NB2 Stitch
+
+Composites the NB2-generated image back onto the original canvas.
+
+Inputs:
+
+| Name | Type | Description |
+|---|---|---|
+| stitcher | STITCHER | Coordinate data from `NB2 Crop` |
+| inpainted_image | IMAGE | RGB or RGBA output from Nano Banana 2 |
+| edge_feather_percent | FLOAT | Extra edge blend width |
+
+Outputs:
+
+- `image`
+
+### NB2 Add Alpha
+
+Converts an RGB image to RGBA by generating a feathered alpha channel. Useful when you want soft-edge RGBA output for compositing.
+
+Inputs:
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | RGB or RGBA input |
+| feather_percent | FLOAT | Edge fade width as a percentage |
+
+Outputs:
+
+- `rgba_image`
+
+### Smart Mask Crop
 
 Local masked-edit crop for models that really use a mask.
 
-Use this when a selector finds a small region like a face, shirt, watch, or sleeve and you do not want to send the full image into a masked editor.
+Use this when a selector finds a small region like a face, shirt, watch, sleeve, or object and you do not want to send the full image into a masked editor.
 
-**Inputs**
+Inputs:
 
 | Name | Type | Description |
 |---|---|---|
@@ -191,69 +180,85 @@ Use this when a selector finds a small region like a face, shirt, watch, or slee
 | resize_mode | choice | `keep_local_size` or `resize_to_target` |
 | target_width | INT | Used when resizing the local crop |
 | target_height | INT | Used when resizing the local crop |
+| downscale_algorithm | choice | Resize down algorithm |
+| upscale_algorithm | choice | Resize up algorithm |
+| device_mode | choice | CPU or GPU execution |
 
-**Outputs** — `stitcher`, `cropped_image`, `cropped_mask`, `preview_image`, `info`
+Outputs:
 
-Recommended usage:
-- `Florence-2 Smart Region Selector -> mask -> Smart Mask Crop -> GPT Image 2 Edit (mask_image from cropped_mask_image) -> Smart Mask Stitch`
+- `stitcher`
+- `cropped_image`
+- `cropped_mask`
+- `cropped_mask_image`
+- `preview_image`
+- `info`
 
----
+Important:
 
-### 🪄 Smart Mask Stitch
+- `cropped_mask_image` is the output you can wire directly into `GPT Image 2 Edit -> mask_image`.
+- This node keeps the edit localized around the selected region instead of sending the whole image to the editor.
 
-Pastes a locally edited masked crop back into the original image using the stored local mask as the main blend.
+### Smart Mask Stitch
 
-This is the mask-edit equivalent of the NB2 crop/stitch path.
+Pastes a locally edited masked crop back into the original image using the stored local mask as the primary blend.
 
----
+Inputs:
 
-## Standard workflow
+| Name | Type | Description |
+|---|---|---|
+| stitcher | STITCHER | Coordinate data from `Smart Mask Crop` |
+| edited_image | IMAGE | Output of the local masked editor |
+| edge_feather_percent | FLOAT | Extra edge feather for the crop boundary |
 
+Outputs:
+
+- `image`
+
+## Recommended Workflows
+
+### 1. NB2 Region Retouch Workflow
+
+```text
+selector or manual region
+    -> NB2 Smart Region or NB2 Mask Generator
+    -> NB2 Crop
+    -> Nano Banana 2 generation
+    -> NB2 Stitch
 ```
-[original image]  (any resolution)
-      │
-      ├─────────────────────────────────────────────────────┐
-      │                                                     │
-      ▼                                                     │
-NB2 Mask Generator                                         │
-  aspect_ratio · resolution · center_x / center_y          │
-  crop_width (auto-set when resolution changes)            │
-      │                                                     │
-      │  mask                                               │
-      ▼                                                     │
-NB2 Crop ────────────────────────────────────────────── (canvas)
-  aspect_ratio · resolution  ← set same values as above
-      │
-      │  stitcher      cropped_image (exact NB2 resolution)
-      │                      │
-      │               [Nano Banana 2]
-      │                      │  generated_image (RGB)
-      │                      │  (can be any NB2 resolution —
-      │                      │   stitch auto-rescales)
-      │                      ▼
-      └──────────────► NB2 Stitch ◄── edge_feather_percent
-                            │
-                     [retouched image]
-                     (same size as original)
+
+Use this when the destination model does not consume an exact mask and you want the existing crop/stitch technique.
+
+### 2. Local Masked Edit Workflow
+
+```text
+Florence-2 Smart Region Selector
+    -> mask
+    -> Smart Mask Crop
+    -> cropped_image -> GPT Image 2 Edit
+    -> cropped_mask_image -> GPT Image 2 Edit.mask_image
+    -> Smart Mask Stitch
 ```
 
----
+Use this when the selected area is small and you want the editing model to work on a focused crop instead of the entire image.
+
+## Compatibility Notes
+
+- `Florence-2 Smart Region Selector` currently supports batch size `1` only.
+- `NB2 Smart Region` accepts `MASK` tensors in `[H, W]` or `[B, H, W]`.
+- `Smart Mask Crop` and `Smart Mask Stitch` reuse the same crop/stitch coordinate logic so the local edit can be pasted back consistently.
 
 ## Tips
 
-- **Aspect ratio first**: set `aspect_ratio` to match the shape of the region you want to retouch, then choose `resolution`. The crop rectangle in the preview updates automatically.
-- **Position with the canvas**: drag the rectangle on the preview to place the crop centre, scroll to resize. No need to run the pipeline to see the position.
-- **Quality vs. speed**: generating at 4K on a 2K-sized crop gives more NB2 detail at the cost of processing time. The stitch downscales cleanly. For fast iteration, use 1K or 2K.
-- **Feather**: `edge_feather_percent` between 3 and 8 is usually enough for a natural blend. Increase it if the original and generated areas have very different lighting.
-
----
-
+- For `face`, start with `padding_percent` around `10` to `18`.
+- For `upper_body`, start with `8` to `15`.
+- For `object`, start with `5` to `12`.
+- For local masked editing, keep `context_expand` around `1.1` to `1.25` so the edited region has enough context without becoming too diffuse.
+- For stitch feathering, `3` to `8` is usually enough.
 
 ## Workflow
 
 A ready-to-use ComfyUI workflow is included in this repo.  
 [Download inpainting_workflow.json](workflows/inpainting_workflow.json)
-
 
 ## Installation
 
@@ -262,11 +267,23 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/amortegui84/comfyui-inpaint-cropstitch-nb2
 ```
 
-Restart ComfyUI. No additional Python packages are required beyond those already used by ComfyUI.
+Restart ComfyUI after updating.
 
----
+## Update From GitHub
+
+Inside the repo folder:
+
+```bash
+git pull origin master
+```
+
+If you are updating from your ComfyUI install:
+
+```bash
+cd ComfyUI/custom_nodes/comfyui-inpaint-cropstitch-nb2
+git pull origin master
+```
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
-Original work © 2024 lquesada. Modifications © 2025 amortegui84.
+Apache 2.0 - see [LICENSE](LICENSE). Original work copyright 2024 lquesada. Modifications copyright 2025 amortegui84.
