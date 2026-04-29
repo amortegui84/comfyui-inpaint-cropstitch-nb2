@@ -260,6 +260,12 @@ Use this when the selected area is small and you want the editing model to work 
 A ready-to-use ComfyUI workflow is included in this repo.  
 [Download inpainting_workflow.json](workflows/inpainting_workflow.json)
 
+Additional sample workflows for the new smart-region flows:
+
+- [01_nb2_smart_region_face_roundtrip.json](workflows/01_nb2_smart_region_face_roundtrip.json)
+- [02_local_mask_edit_face_gpt_image2.json](workflows/02_local_mask_edit_face_gpt_image2.json)
+- [03_local_mask_edit_object_template.json](workflows/03_local_mask_edit_object_template.json)
+
 ## Installation
 
 ```bash
