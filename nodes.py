@@ -937,6 +937,25 @@ def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
             f"mask resized {old_w}x{old_h} -> {target_w}x{target_h}"
         )
 
+    # Fix 2: mask is already at image size but kijai placed Florence's internal
+    # [0–1024] pixel coordinates directly on the large canvas → all active
+    # pixels are in the top-left 1024×1024 corner, causing a tiny misplaced mask.
+    _FLORENCE_SIZE = 1024
+    if (depad_florence
+            and mask.shape[1] == target_h
+            and mask.shape[2] == target_w
+            and target_h > _FLORENCE_SIZE
+            and target_w > _FLORENCE_SIZE
+            and mask.any()
+            and not mask[:, _FLORENCE_SIZE:, :].any()
+            and not mask[:, :, _FLORENCE_SIZE:].any()):
+        crop = mask[:, :_FLORENCE_SIZE, :_FLORENCE_SIZE]
+        mask = processor.rescale_m(crop, target_w, target_h, "nearest")
+        note_parts.append(
+            f"Florence coord fix: active pixels within {_FLORENCE_SIZE}px corner"
+            f" of {target_w}x{target_h}, rescaled to full image"
+        )
+
     return mask, image, (" | ".join(note_parts) if note_parts else "mask already matched image")
 # ===========================================================================
 #  NEW NODE 1 — NanoBanana2MaskGen
