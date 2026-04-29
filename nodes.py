@@ -901,17 +901,58 @@ def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
         raise ValueError(f"{node_name}: image and mask batch sizes are incompatible.")
 
     target_h, target_w = image.shape[1], image.shape[2]
+    target_ar = target_w / target_h
+
+    # Fix 2: kijai's Florence2Run outputs the mask at the original image size
+    # but places detections in Florence's 1024-pixel coordinate space, so all
+    # active pixels land in the top-left region (columns < 1024 and/or rows <
+    # 1024), making the mask appear tiny and stuck to the upper-left corner.
+    # Detect this by checking that at least one image dimension exceeds 1024 and
+    # that no active pixels exist beyond the 1024-px boundary in that dimension.
+    # Then extract the true content area (removing Florence's letterbox padding)
+    # and rescale it to the full image size.
+    _FLORENCE_SIZE = 1024
+    _wide = target_w > _FLORENCE_SIZE
+    _tall = target_h > _FLORENCE_SIZE
+    if (depad_florence
+            and mask.shape[1] == target_h
+            and mask.shape[2] == target_w
+            and (_wide or _tall)
+            and mask.any()
+            and (not _tall or not mask[:, _FLORENCE_SIZE:, :].any())
+            and (not _wide or not mask[:, :, _FLORENCE_SIZE:].any())):
+        # Compute Florence's letterbox offsets for this image's aspect ratio,
+        # then extract only the content pixels (without the padding rows/cols).
+        if target_w >= target_h:  # landscape or square
+            content_h = max(1, round(_FLORENCE_SIZE * target_h / target_w))
+            pad_y     = (_FLORENCE_SIZE - content_h) // 2
+            row_start = min(pad_y, target_h - 1)
+            row_end   = min(pad_y + content_h, target_h)
+            col_end   = min(target_w, _FLORENCE_SIZE)
+            content   = mask[:, row_start:row_end, :col_end]
+            fix2_note = (f"Florence coord fix: landscape {target_w}x{target_h}"
+                         f" depad y[{row_start}:{row_end}/{_FLORENCE_SIZE}]")
+        else:  # portrait
+            content_w = max(1, round(_FLORENCE_SIZE * target_w / target_h))
+            pad_x     = (_FLORENCE_SIZE - content_w) // 2
+            row_end   = min(target_h, _FLORENCE_SIZE)
+            col_start = min(pad_x, target_w - 1)
+            col_end   = min(pad_x + content_w, target_w)
+            content   = mask[:, :row_end, col_start:col_end]
+            fix2_note = (f"Florence coord fix: portrait {target_w}x{target_h}"
+                         f" depad x[{col_start}:{col_end}/{_FLORENCE_SIZE}]")
+        mask = processor.rescale_m(content, target_w, target_h, "nearest")
+        note_parts.append(fix2_note + f", rescaled to {target_w}x{target_h}")
+
     if mask.shape[1] != target_h or mask.shape[2] != target_w:
         old_h, old_w = mask.shape[1], mask.shape[2]
 
-        # Florence2 letterbox correction:
+        # Fix 1 — Florence2 letterbox correction for masks at 1024×1024:
         # Florence2 pads images to a square before processing. The output mask
-        # is in that padded-square space. Naively resizing to the original image
-        # dimensions stretches the padding into the image area and shifts the
-        # detected region. Detect and remove the padding first.
+        # is in that padded-square space. Detect and remove the padding before
+        # rescaling so the detected region lands at the correct position.
         if depad_florence and old_h > 0 and old_w > 0:
-            mask_ar   = old_w / old_h
-            target_ar = target_w / target_h
+            mask_ar = old_w / old_h
             if abs(mask_ar - target_ar) > 0.05 and abs(mask_ar - 1.0) < 0.05:
                 if target_ar > 1.0:
                     # Landscape original → Florence padded top/bottom
@@ -935,25 +976,6 @@ def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
         mask = processor.rescale_m(mask, target_w, target_h, "nearest")
         note_parts.append(
             f"mask resized {old_w}x{old_h} -> {target_w}x{target_h}"
-        )
-
-    # Fix 2: mask is already at image size but kijai placed Florence's internal
-    # [0–1024] pixel coordinates directly on the large canvas → all active
-    # pixels are in the top-left 1024×1024 corner, causing a tiny misplaced mask.
-    _FLORENCE_SIZE = 1024
-    if (depad_florence
-            and mask.shape[1] == target_h
-            and mask.shape[2] == target_w
-            and target_h > _FLORENCE_SIZE
-            and target_w > _FLORENCE_SIZE
-            and mask.any()
-            and not mask[:, _FLORENCE_SIZE:, :].any()
-            and not mask[:, :, _FLORENCE_SIZE:].any()):
-        crop = mask[:, :_FLORENCE_SIZE, :_FLORENCE_SIZE]
-        mask = processor.rescale_m(crop, target_w, target_h, "nearest")
-        note_parts.append(
-            f"Florence coord fix: active pixels within {_FLORENCE_SIZE}px corner"
-            f" of {target_w}x{target_h}, rescaled to full image"
         )
 
     return mask, image, (" | ".join(note_parts) if note_parts else "mask already matched image")
