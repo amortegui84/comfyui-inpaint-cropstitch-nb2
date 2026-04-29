@@ -787,6 +787,79 @@ def _make_nb2_preview(img_tensor: torch.Tensor, y1: int, x1: int,
     return preview_tensor, temp_info
 
 
+def _fit_nb2_rect_to_mask(mask_2d: torch.Tensor, image_w: int, image_h: int,
+                          target_ar: float, padding_percent: float,
+                          crop_scale: float):
+    """Fit a target-aspect rectangle around a semantic mask."""
+    nz = torch.nonzero(mask_2d > 0.0)
+    if nz.numel() == 0:
+        raise ValueError("region_mask is empty; cannot derive an NB2 rectangle.")
+
+    y1 = int(torch.min(nz[:, 0]).item())
+    x1 = int(torch.min(nz[:, 1]).item())
+    y2 = int(torch.max(nz[:, 0]).item()) + 1
+    x2 = int(torch.max(nz[:, 1]).item()) + 1
+
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+
+    pad_x = int(round(box_w * (padding_percent / 100.0)))
+    pad_y = int(round(box_h * (padding_percent / 100.0)))
+
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(image_w, x2 + pad_x)
+    y2 = min(image_h, y2 + pad_y)
+
+    padded_w = max(1, x2 - x1)
+    padded_h = max(1, y2 - y1)
+    center_x = (x1 + x2) / 2.0
+    center_y = (y1 + y2) / 2.0
+
+    if (padded_w / padded_h) < target_ar:
+        rect_h = float(padded_h)
+        rect_w = rect_h * target_ar
+    else:
+        rect_w = float(padded_w)
+        rect_h = rect_w / target_ar
+
+    rect_w *= max(1.0, crop_scale)
+    rect_h *= max(1.0, crop_scale)
+
+    max_rect_w = float(image_w)
+    max_rect_h = max_rect_w / target_ar
+    if max_rect_h > image_h:
+        max_rect_h = float(image_h)
+        max_rect_w = max_rect_h * target_ar
+
+    if rect_w > max_rect_w or rect_h > max_rect_h:
+        rect_w = max_rect_w
+        rect_h = max_rect_h
+
+    cw = max(1, int(round(rect_w)))
+    ch = max(1, int(round(rect_h)))
+
+    ch = max(1, min(image_h, int(round(cw / target_ar))))
+    cw = max(1, min(image_w, int(round(ch * target_ar))))
+
+    if cw > image_w or ch > image_h:
+        fit_w = image_w
+        fit_h = int(round(fit_w / target_ar))
+        if fit_h > image_h:
+            fit_h = image_h
+            fit_w = int(round(fit_h * target_ar))
+        cw = max(1, min(image_w, fit_w))
+        ch = max(1, min(image_h, fit_h))
+
+    rect_x1 = int(round(center_x - cw / 2.0))
+    rect_y1 = int(round(center_y - ch / 2.0))
+
+    rect_x1 = max(0, min(rect_x1, image_w - cw))
+    rect_y1 = max(0, min(rect_y1, image_h - ch))
+
+    return rect_x1, rect_y1, cw, ch
+
+
 # ===========================================================================
 #  NEW NODE 1 — NanoBanana2MaskGen
 # ===========================================================================
@@ -879,6 +952,133 @@ class NanoBanana2MaskGen:
         result = {"result": (mask, nb2_w, nb2_h, preview_batch)}
         if temp_info:
             result["ui"] = {"nb2_preview": [temp_info]}
+        return result
+
+
+class NB2SmartRegionMask:
+    """
+    Converts any semantic mask into a rectangular NB2-compatible crop mask.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "region_mask": ("MASK",),
+                "aspect_ratio": (["16:9", "9:16", "1:1"], {"default": "16:9"}),
+                "resolution":   (["1K", "2K", "4K"], {"default": "2K"}),
+                "padding_percent": ("FLOAT", {
+                    "default": 8.0, "min": 0.0, "max": 100.0, "step": 0.5,
+                    "tooltip": "Expands the detected region before rectangle fitting."}),
+                "crop_scale": ("FLOAT", {
+                    "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.01,
+                    "tooltip": "Additional scale multiplier applied after aspect-ratio fitting."}),
+            }
+        }
+
+    RETURN_TYPES = ("MASK", "INT", "INT", "IMAGE", "INT", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = (
+        "mask",
+        "nb2_width",
+        "nb2_height",
+        "preview_image",
+        "center_x",
+        "center_y",
+        "crop_width",
+        "crop_height",
+        "info",
+    )
+    FUNCTION = "generate_from_region"
+    CATEGORY = "inpaint/nb2"
+    DESCRIPTION = (
+        "Fits a rectangular NB2 crop around a semantic region mask. "
+        "Use this after a Florence/SAM-style selector when you want to keep "
+        "the existing NB2 Crop and NB2 Stitch workflow."
+    )
+
+    def generate_from_region(self, image, region_mask, aspect_ratio, resolution,
+                             padding_percent, crop_scale):
+        image = image.clone()
+        region_mask = region_mask.clone()
+
+        if image.shape[0] > 1 and region_mask.shape[0] == 1:
+            region_mask = region_mask.expand(image.shape[0], -1, -1).clone()
+        if region_mask.shape[0] > 1 and image.shape[0] == 1:
+            image = image.expand(region_mask.shape[0], -1, -1, -1).clone()
+
+        if image.shape[0] != region_mask.shape[0]:
+            raise ValueError("image and region_mask batch sizes are incompatible.")
+
+        B, H, W, _ = image.shape
+        nb2_w, nb2_h = NB2_RESOLUTIONS[aspect_ratio][resolution]
+        target_ar = nb2_w / nb2_h
+
+        mask_out = torch.zeros(B, H, W, dtype=torch.float32)
+        previews = []
+        infos = []
+        preview_ui = []
+
+        center_x_out = []
+        center_y_out = []
+        crop_w_out = []
+        crop_h_out = []
+
+        for i in range(B):
+            x1, y1, cw, ch = _fit_nb2_rect_to_mask(
+                region_mask[i], W, H, target_ar, padding_percent, crop_scale
+            )
+            mask_out[i, y1:y1 + ch, x1:x1 + cw] = 1.0
+
+            center_x = x1 + cw // 2
+            center_y = y1 + ch // 2
+
+            center_x_out.append(int(center_x))
+            center_y_out.append(int(center_y))
+            crop_w_out.append(int(cw))
+            crop_h_out.append(int(ch))
+
+            preview_tensor, temp_info = _make_nb2_preview(image[i], y1, x1, ch, cw)
+            previews.append(preview_tensor.squeeze(0))
+            if i == 0 and temp_info:
+                preview_ui.append(temp_info)
+
+            infos.append({
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+                "padding_percent": padding_percent,
+                "crop_scale": crop_scale,
+                "x1": int(x1),
+                "y1": int(y1),
+                "x2": int(x1 + cw),
+                "y2": int(y1 + ch),
+                "center_x": int(center_x),
+                "center_y": int(center_y),
+                "crop_width": int(cw),
+                "crop_height": int(ch),
+                "nb2_width": int(nb2_w),
+                "nb2_height": int(nb2_h),
+            })
+
+        preview_batch = torch.stack(previews, dim=0)
+        result = {
+            "result": (
+                mask_out,
+                nb2_w,
+                nb2_h,
+                preview_batch,
+                center_x_out[0],
+                center_y_out[0],
+                crop_w_out[0],
+                crop_h_out[0],
+                str(infos[0] if len(infos) == 1 else {
+                    "batch_count": len(infos),
+                    "first": infos[0],
+                }),
+            )
+        }
+        if preview_ui:
+            result["ui"] = {"nb2_preview": preview_ui}
         return result
 
 
@@ -1278,6 +1478,7 @@ class NB2AddAlpha:
 
 NODE_CLASS_MAPPINGS = {
     "NanoBanana2MaskGen":  NanoBanana2MaskGen,
+    "NB2SmartRegionMask":  NB2SmartRegionMask,
     "InpaintCropNB2":      InpaintCropNB2,
     "InpaintStitchNB2":    InpaintStitchNB2,
     "NB2AddAlpha":         NB2AddAlpha,
@@ -1285,6 +1486,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NanoBanana2MaskGen":  "🎯 NB2 Mask Generator",
+    "NB2SmartRegionMask":  "🧠 NB2 Smart Region",
     "InpaintCropNB2":      "✂️ NB2 Crop",
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",

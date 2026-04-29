@@ -145,6 +145,35 @@ For the standard NB2 retouching workflow, this node is not needed — use `edge_
 
 ---
 
+### 🧠 NB2 Smart Region
+
+Automatic NB2 rectangle fitting from a semantic mask.
+
+Use this when you already have a region mask from another node such as:
+- Florence-2 Smart Region Selector
+- SAM / segmentation nodes
+- any external object-selection pipeline
+
+**Inputs**
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| region_mask | MASK | Semantic mask to fit |
+| aspect_ratio | choice | 16:9 · 9:16 · 1:1 |
+| resolution | choice | 1K · 2K · 4K |
+| padding_percent | FLOAT | Expands the detected region before rectangle fitting |
+| crop_scale | FLOAT | Additional scale multiplier after fitting |
+
+**Outputs** — `MASK`, `nb2_width (INT)`, `nb2_height (INT)`, `preview (IMAGE)`, `center_x`, `center_y`, `crop_width`, `crop_height`, `info`
+
+**Recommended usage**
+
+- `Florence-2 Smart Region Selector -> mask -> NB2 Smart Region -> NB2 Crop -> generation -> NB2 Stitch`
+- For masked editing instead of NB2 crop workflows, use the selector's `mask_image` output directly with GPT Image editing nodes.
+
+---
+
 ## Standard workflow
 
 ```
