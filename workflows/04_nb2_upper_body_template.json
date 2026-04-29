@@ -67,7 +67,7 @@
         {"name": "info", "type": "STRING", "links": null}
       ],
       "properties": {"Node name for S&R": "NB2SmartRegionMask"},
-      "widgets_values": ["16:9", "2K", 14, 1.12]
+      "widgets_values": ["16:9", "2K", 14, 1.12, true]
     },
     {
       "id": 4,

@@ -64,7 +64,7 @@
         {"name": "info", "type": "STRING", "links": null}
       ],
       "properties": {"Node name for S&R": "SmartMaskCrop"},
-      "widgets_values": [1.12, "resize_to_target", 1024, 1024, "bilinear", "bicubic", "gpu (much faster)"]
+      "widgets_values": [1.12, "resize_to_target", 1024, 1024, "bilinear", "bicubic", "gpu (much faster)", true]
     },
     {
       "id": 4,

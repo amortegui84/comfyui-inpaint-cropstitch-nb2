@@ -2,7 +2,7 @@
   "id": "dbef870e-e53b-4ae5-b5f2-2d0aa6670002",
   "revision": 0,
   "last_node_id": 9,
-  "last_link_id": 10,
+  "last_link_id": 11,
   "nodes": [
     {
       "id": 1,
@@ -33,7 +33,7 @@
       ],
       "outputs": [
         {"name": "mask", "type": "MASK", "links": [2]},
-        {"name": "mask_image", "type": "IMAGE", "links": [9]},
+        {"name": "mask_image", "type": "IMAGE", "links": null},
         {"name": "info", "type": "STRING", "links": null},
         {"name": "center_x", "type": "INT", "links": null},
         {"name": "center_y", "type": "INT", "links": null},
@@ -64,7 +64,7 @@
         {"name": "info", "type": "STRING", "links": null}
       ],
       "properties": {"Node name for S&R": "SmartMaskCrop"},
-      "widgets_values": [1.15, "resize_to_target", 1024, 1024, "bilinear", "bicubic", "gpu (much faster)"]
+      "widgets_values": [1.15, "resize_to_target", 1024, 1024, "bilinear", "bicubic", "gpu (much faster)", true]
     },
     {
       "id": 4,
@@ -177,7 +177,6 @@
     [6, 3, 3, 4, 1, "IMAGE"],
     [7, 4, 0, 5, 1, "IMAGE"],
     [8, 3, 3, 8, 0, "IMAGE"],
-    [9, 2, 1, 9, 0, "IMAGE"],
     [10, 3, 1, 9, 0, "IMAGE"],
     [11, 5, 0, 6, 0, "IMAGE"]
   ],
