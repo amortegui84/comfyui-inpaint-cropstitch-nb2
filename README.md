@@ -164,7 +164,69 @@ Outputs:
 
 - `rgba_image`
 
-### Smart Mask Crop
+### 🧠 NB2 Smart Region
+
+Automatic NB2 rectangle fitting from a semantic mask.
+
+Use this when you already have a region mask from another node such as:
+- Florence2Run from `kijai/ComfyUI-Florence2`
+- SAM / segmentation nodes
+- any external object-selection pipeline
+
+**Inputs**
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| region_mask | MASK | Semantic mask to fit |
+| aspect_ratio | choice | 16:9 · 9:16 · 1:1 |
+| resolution | choice | 1K · 2K · 4K |
+| padding_percent | FLOAT | Expands the detected region before rectangle fitting |
+| crop_scale | FLOAT | Additional scale multiplier after fitting |
+
+**Outputs** — `MASK`, `nb2_width (INT)`, `nb2_height (INT)`, `preview (IMAGE)`, `center_x`, `center_y`, `crop_width`, `crop_height`, `info`
+
+**Recommended usage**
+
+- `Florence2Run (kijai) -> mask -> NB2 Smart Region -> NB2 Crop -> generation -> NB2 Stitch`
+- For masked editing instead of NB2 crop workflows, use the selector's `mask_image` output directly with GPT Image editing nodes.
+- `NB2 Smart Region` accepts `MASK` tensors in either `[H, W]` or `[B, H, W]` form and automatically resizes them to the source image if needed.
+
+---
+
+### 🪄 Smart Mask Crop
+
+Local masked-edit crop for models that really use a mask.
+
+Use this when a selector finds a small region like a face, shirt, watch, or sleeve and you do not want to send the full image into a masked editor.
+
+**Inputs**
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| mask | MASK | Local semantic mask |
+| context_expand | FLOAT | Grows the detected region before crop |
+| resize_mode | choice | `keep_local_size` or `resize_to_target` |
+| target_width | INT | Used when resizing the local crop |
+| target_height | INT | Used when resizing the local crop |
+
+**Outputs** — `stitcher`, `cropped_image`, `cropped_mask`, `preview_image`, `info`
+
+Recommended usage:
+- `Florence2Run (kijai) -> mask -> Smart Mask Crop -> GPT Image 2 Edit (mask_image from cropped_mask_image) -> Smart Mask Stitch`
+
+---
+
+### 🪄 Smart Mask Stitch
+
+Pastes a locally edited masked crop back into the original image using the stored local mask as the main blend.
+
+This is the mask-edit equivalent of the NB2 crop/stitch path.
+
+---
+
+## Standard workflow
 
 Local masked-edit crop for models that really use a mask.
 
@@ -231,7 +293,7 @@ Use this when the destination model does not consume an exact mask and you want 
 ### 2. Local Masked Edit Workflow
 
 ```text
-Florence-2 Smart Region Selector
+Florence2Run (kijai)
     -> mask
     -> Smart Mask Crop
     -> cropped_image -> GPT Image 2 Edit
@@ -243,7 +305,7 @@ Use this when the selected area is small and you want the editing model to work 
 
 ## Compatibility Notes
 
-- `Florence-2 Smart Region Selector` currently supports batch size `1` only.
+- `Florence2Run (kijai)` may emit a mask at a different resolution than the source image; these nodes now resize it automatically before fitting or cropping.
 - `NB2 Smart Region` accepts `MASK` tensors in `[H, W]` or `[B, H, W]`.
 - `Smart Mask Crop` and `Smart Mask Stitch` reuse the same crop/stitch coordinate logic so the local edit can be pasted back consistently.
 

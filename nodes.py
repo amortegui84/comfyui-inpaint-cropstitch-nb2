@@ -860,6 +860,50 @@ def _fit_nb2_rect_to_mask(mask_2d: torch.Tensor, image_w: int, image_h: int,
     return rect_x1, rect_y1, cw, ch
 
 
+def _normalize_mask_to_image(mask: torch.Tensor, image: torch.Tensor,
+                             processor: ProcessorLogic,
+                             node_name: str) -> tuple[torch.Tensor, torch.Tensor, str]:
+    """
+    Make a MASK tensor match an IMAGE tensor in rank, batch, and spatial size.
+
+    Florence / segmentation nodes may emit a valid MASK tensor whose width and
+    height do not match the source IMAGE. For crop logic that derives a bbox
+    from the mask, that mismatch shifts the selected region.
+    """
+    note_parts = []
+
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+        note_parts.append("mask [H,W] -> [1,H,W]")
+    elif mask.ndim != 3:
+        raise ValueError(
+            f"{node_name} expected MASK [H,W] or [B,H,W], got {tuple(mask.shape)}."
+        )
+
+    if image.ndim != 4:
+        raise ValueError(
+            f"{node_name} expected IMAGE [B,H,W,C], got {tuple(image.shape)}."
+        )
+
+    if mask.shape[0] > 1 and image.shape[0] == 1:
+        image = image.expand(mask.shape[0], -1, -1, -1).clone()
+        note_parts.append(f"image batch expanded 1->{mask.shape[0]}")
+    if image.shape[0] > 1 and mask.shape[0] == 1:
+        mask = mask.expand(image.shape[0], -1, -1).clone()
+        note_parts.append(f"mask batch expanded 1->{image.shape[0]}")
+
+    if image.shape[0] != mask.shape[0]:
+        raise ValueError(f"{node_name}: image and mask batch sizes are incompatible.")
+
+    target_h, target_w = image.shape[1], image.shape[2]
+    if mask.shape[1] != target_h or mask.shape[2] != target_w:
+        old_h, old_w = mask.shape[1], mask.shape[2]
+        mask = processor.rescale_m(mask, target_w, target_h, "nearest")
+        note_parts.append(
+            f"mask resized {old_w}x{old_h} -> {target_w}x{target_h}"
+        )
+
+    return mask, image, (" | ".join(note_parts) if note_parts else "mask already matched image")
 # ===========================================================================
 #  NEW NODE 1 — NanoBanana2MaskGen
 # ===========================================================================
@@ -1001,26 +1045,10 @@ class NB2SmartRegionMask:
                              padding_percent, crop_scale):
         image = image.clone()
         region_mask = region_mask.clone()
-
-        if region_mask.ndim == 2:
-            region_mask = region_mask.unsqueeze(0)
-        elif region_mask.ndim != 3:
-            raise ValueError(
-                f"region_mask must be a MASK tensor with shape [H,W] or [B,H,W], got {tuple(region_mask.shape)}."
-            )
-
-        if image.ndim != 4:
-            raise ValueError(
-                f"image must be an IMAGE tensor with shape [B,H,W,C], got {tuple(image.shape)}."
-            )
-
-        if image.shape[0] > 1 and region_mask.shape[0] == 1:
-            region_mask = region_mask.expand(image.shape[0], -1, -1).clone()
-        if region_mask.shape[0] > 1 and image.shape[0] == 1:
-            image = image.expand(region_mask.shape[0], -1, -1, -1).clone()
-
-        if image.shape[0] != region_mask.shape[0]:
-            raise ValueError("image and region_mask batch sizes are incompatible.")
+        processor = CPUProcessorLogic()
+        region_mask, image, mask_note = _normalize_mask_to_image(
+            region_mask, image, processor, "NB2SmartRegionMask"
+        )
 
         B, H, W, _ = image.shape
         nb2_w, nb2_h = NB2_RESOLUTIONS[aspect_ratio][resolution]
@@ -1070,6 +1098,7 @@ class NB2SmartRegionMask:
                 "crop_height": int(ch),
                 "nb2_width": int(nb2_w),
                 "nb2_height": int(nb2_h),
+                "mask_note": mask_note,
             })
 
         preview_batch = torch.stack(previews, dim=0)
@@ -1138,12 +1167,6 @@ class SmartMaskCrop:
                         upscale_algorithm, device_mode):
         image = image.clone()
         mask = mask.clone()
-
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
-        if image.ndim != 4 or mask.ndim != 3:
-            raise ValueError("Expected IMAGE [B,H,W,C] and MASK [H,W] or [B,H,W].")
-
         if device_mode == "gpu (much faster)":
             device = comfy.model_management.get_torch_device()
             image = image.to(device)
@@ -1152,14 +1175,9 @@ class SmartMaskCrop:
         else:
             device = torch.device("cpu")
             processor = CPUProcessorLogic()
-
-        if mask.shape[0] > 1 and image.shape[0] == 1:
-            image = image.expand(mask.shape[0], -1, -1, -1).clone()
-        if image.shape[0] > 1 and mask.shape[0] == 1:
-            mask = mask.expand(image.shape[0], -1, -1).clone()
-
-        if image.shape[0] != mask.shape[0]:
-            raise ValueError("image and mask batch sizes are incompatible.")
+        mask, image, mask_note = _normalize_mask_to_image(
+            mask, image, processor, "SmartMaskCrop"
+        )
 
         result_stitcher = {
             'downscale_algorithm': downscale_algorithm,
@@ -1255,6 +1273,7 @@ class SmartMaskCrop:
                 "crop_canvas_y": int(ctc_y),
                 "crop_canvas_w": int(ctc_w),
                 "crop_canvas_h": int(ctc_h),
+                "mask_note": mask_note,
             })
 
         result = {
@@ -1483,16 +1502,9 @@ class InpaintCropNB2:
         if mask is None:
             mask = torch.ones_like(image[:, :, :, 0])
 
-        # Batch / shape corrections (same logic as original node)
-        if (mask.shape[0] == 1 or mask.shape[0] == image.shape[0]):
-            if mask.shape[1] != image.shape[1] or mask.shape[2] != image.shape[2]:
-                if torch.count_nonzero(mask) == 0:
-                    mask = torch.zeros((mask.shape[0], image.shape[1], image.shape[2]),
-                                       device=image.device, dtype=image.dtype)
-        if mask.shape[0] > 1 and image.shape[0] == 1:
-            image = image.expand(mask.shape[0], -1, -1, -1).clone()
-        if image.shape[0] > 1 and mask.shape[0] == 1:
-            mask = mask.expand(image.shape[0], -1, -1).clone()
+        mask, image, _mask_note = _normalize_mask_to_image(
+            mask, image, processor, "InpaintCropNB2"
+        )
 
         assert image.ndim == 4, f"Expected 4D image tensor, got {image.shape}"
         assert mask.ndim  == 3, f"Expected 3D mask tensor,  got {mask.shape}"
