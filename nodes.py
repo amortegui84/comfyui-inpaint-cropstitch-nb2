@@ -1995,18 +1995,35 @@ class NB2Florence2RegionSelector:
         "API key can be provided by input or environment variable."
     )
 
+    def _looks_like_api_key(self, value):
+        candidate = (value or "").strip()
+        if not candidate:
+            return False
+        if len(candidate) < 24:
+            return False
+        return ":" in candidate or candidate.startswith("fal_")
+
     def _resolve_api_key(self, api_key, api_key_env_var):
         direct_key = (api_key or "").strip()
         if direct_key:
             return direct_key
 
         env_name = (api_key_env_var or "FAL_KEY").strip() or "FAL_KEY"
+
+        # If the key was pasted into the env-var field by mistake, treat it as
+        # the key directly instead of leaking it back in an error message.
+        if self._looks_like_api_key(env_name):
+            logger.warning(
+                "Florence node received an API key in api_key_env_var; using it as a direct key."
+            )
+            return env_name
+
         env_key = os.getenv(env_name, "").strip()
         if env_key:
             return env_key
 
         raise ValueError(
-            f"Missing FAL API key. Paste it into api_key or set the {env_name} environment variable."
+            "Missing FAL API key. Paste it into api_key or set the configured environment variable."
         )
 
     def _get_fal_client(self):
