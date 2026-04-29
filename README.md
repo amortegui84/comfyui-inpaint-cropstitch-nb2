@@ -171,6 +171,39 @@ Use this when you already have a region mask from another node such as:
 
 - `Florence-2 Smart Region Selector -> mask -> NB2 Smart Region -> NB2 Crop -> generation -> NB2 Stitch`
 - For masked editing instead of NB2 crop workflows, use the selector's `mask_image` output directly with GPT Image editing nodes.
+- `NB2 Smart Region` accepts `MASK` tensors in either `[H, W]` or `[B, H, W]` form.
+
+---
+
+### 🪄 Smart Mask Crop
+
+Local masked-edit crop for models that really use a mask.
+
+Use this when a selector finds a small region like a face, shirt, watch, or sleeve and you do not want to send the full image into a masked editor.
+
+**Inputs**
+
+| Name | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| mask | MASK | Local semantic mask |
+| context_expand | FLOAT | Grows the detected region before crop |
+| resize_mode | choice | `keep_local_size` or `resize_to_target` |
+| target_width | INT | Used when resizing the local crop |
+| target_height | INT | Used when resizing the local crop |
+
+**Outputs** — `stitcher`, `cropped_image`, `cropped_mask`, `preview_image`, `info`
+
+Recommended usage:
+- `Florence-2 Smart Region Selector -> mask -> Smart Mask Crop -> GPT Image 2 Edit (mask_image from cropped_mask_image) -> Smart Mask Stitch`
+
+---
+
+### 🪄 Smart Mask Stitch
+
+Pastes a locally edited masked crop back into the original image using the stored local mask as the main blend.
+
+This is the mask-edit equivalent of the NB2 crop/stitch path.
 
 ---
 

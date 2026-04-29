@@ -1002,6 +1002,18 @@ class NB2SmartRegionMask:
         image = image.clone()
         region_mask = region_mask.clone()
 
+        if region_mask.ndim == 2:
+            region_mask = region_mask.unsqueeze(0)
+        elif region_mask.ndim != 3:
+            raise ValueError(
+                f"region_mask must be a MASK tensor with shape [H,W] or [B,H,W], got {tuple(region_mask.shape)}."
+            )
+
+        if image.ndim != 4:
+            raise ValueError(
+                f"image must be an IMAGE tensor with shape [B,H,W,C], got {tuple(image.shape)}."
+            )
+
         if image.shape[0] > 1 and region_mask.shape[0] == 1:
             region_mask = region_mask.expand(image.shape[0], -1, -1).clone()
         if region_mask.shape[0] > 1 and image.shape[0] == 1:
@@ -1080,6 +1092,318 @@ class NB2SmartRegionMask:
         if preview_ui:
             result["ui"] = {"nb2_preview": preview_ui}
         return result
+
+
+class SmartMaskCrop:
+    """
+    Crop a local masked edit region so mask-based editors work on a focused area
+    instead of the whole image.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "context_expand": ("FLOAT", {
+                    "default": 1.15, "min": 1.0, "max": 4.0, "step": 0.01,
+                    "tooltip": "Grow the detected mask region before cropping."}),
+                "resize_mode": (["keep_local_size", "resize_to_target"], {
+                    "default": "resize_to_target"}),
+                "target_width": ("INT", {
+                    "default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1}),
+                "target_height": ("INT", {
+                    "default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1}),
+                "downscale_algorithm": (["nearest", "bilinear", "bicubic", "lanczos",
+                                         "box", "hamming"], {"default": "bilinear"}),
+                "upscale_algorithm":   (["nearest", "bilinear", "bicubic", "lanczos",
+                                         "box", "hamming"], {"default": "bicubic"}),
+                "device_mode": (["gpu (much faster)", "cpu (compatible)"],
+                                {"default": "gpu (much faster)"}),
+            }
+        }
+
+    RETURN_TYPES = ("STITCHER", "IMAGE", "MASK", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("stitcher", "cropped_image", "cropped_mask", "cropped_mask_image", "preview_image", "info")
+    FUNCTION = "smart_mask_crop"
+    CATEGORY = "inpaint/masked"
+    DESCRIPTION = (
+        "Crops a focused local region around a mask, keeping a local mask for "
+        "mask-based editing models such as GPT Image."
+    )
+
+    def smart_mask_crop(self, image, mask, context_expand, resize_mode,
+                        target_width, target_height, downscale_algorithm,
+                        upscale_algorithm, device_mode):
+        image = image.clone()
+        mask = mask.clone()
+
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if image.ndim != 4 or mask.ndim != 3:
+            raise ValueError("Expected IMAGE [B,H,W,C] and MASK [H,W] or [B,H,W].")
+
+        if device_mode == "gpu (much faster)":
+            device = comfy.model_management.get_torch_device()
+            image = image.to(device)
+            mask = mask.to(device)
+            processor = GPUProcessorLogic()
+        else:
+            device = torch.device("cpu")
+            processor = CPUProcessorLogic()
+
+        if mask.shape[0] > 1 and image.shape[0] == 1:
+            image = image.expand(mask.shape[0], -1, -1, -1).clone()
+        if image.shape[0] > 1 and mask.shape[0] == 1:
+            mask = mask.expand(image.shape[0], -1, -1).clone()
+
+        if image.shape[0] != mask.shape[0]:
+            raise ValueError("image and mask batch sizes are incompatible.")
+
+        result_stitcher = {
+            'downscale_algorithm': downscale_algorithm,
+            'upscale_algorithm': upscale_algorithm,
+            'canvas_to_orig_x': [],
+            'canvas_to_orig_y': [],
+            'canvas_to_orig_w': [],
+            'canvas_to_orig_h': [],
+            'canvas_image': [],
+            'cropped_to_canvas_x': [],
+            'cropped_to_canvas_y': [],
+            'cropped_to_canvas_w': [],
+            'cropped_to_canvas_h': [],
+            'cropped_mask_for_blend': [],
+            'device_mode': device_mode,
+        }
+        result_image = []
+        result_mask = []
+        result_mask_image = []
+        preview_ui = []
+        previews = []
+        infos = []
+
+        batch_size = image.shape[0]
+        for i in range(batch_size):
+            sub_image = image[i:i+1]
+            sub_mask = mask[i:i+1]
+
+            _, bx, by, bw, bh = processor.batched_findcontextarea_m(sub_mask)
+            if bx[0] == -1:
+                raise ValueError("mask is empty; Smart Mask Crop requires a non-empty mask.")
+
+            if context_expand > 1.0:
+                _, bx, by, bw, bh = processor.batched_growcontextarea_m(
+                    sub_mask, bx, by, bw, bh, context_expand
+                )
+
+            cur_x = bx[0].item()
+            cur_y = by[0].item()
+            cur_w = bw[0].item()
+            cur_h = bh[0].item()
+
+            if resize_mode == "keep_local_size":
+                out_w = max(1, int(cur_w))
+                out_h = max(1, int(cur_h))
+                resize_output = False
+            else:
+                out_w = int(target_width)
+                out_h = int(target_height)
+                resize_output = True
+
+            (canvas_image, cto_x, cto_y, cto_w, cto_h,
+             cropped_image, cropped_mask,
+             ctc_x, ctc_y, ctc_w, ctc_h) = processor.crop_magic_im(
+                sub_image, sub_mask,
+                cur_x, cur_y, cur_w, cur_h,
+                out_w, out_h,
+                0,
+                downscale_algorithm, upscale_algorithm,
+                resize_output=resize_output)
+
+            result_stitcher['canvas_to_orig_x'].append(cto_x)
+            result_stitcher['canvas_to_orig_y'].append(cto_y)
+            result_stitcher['canvas_to_orig_w'].append(cto_w)
+            result_stitcher['canvas_to_orig_h'].append(cto_h)
+            result_stitcher['canvas_image'].append(canvas_image.cpu())
+            result_stitcher['cropped_to_canvas_x'].append(ctc_x)
+            result_stitcher['cropped_to_canvas_y'].append(ctc_y)
+            result_stitcher['cropped_to_canvas_w'].append(ctc_w)
+            result_stitcher['cropped_to_canvas_h'].append(ctc_h)
+            result_stitcher['cropped_mask_for_blend'].append(cropped_mask.cpu())
+
+            result_image.append(cropped_image.squeeze(0).cpu())
+            result_mask.append(cropped_mask.squeeze(0).cpu())
+            mask_rgb = torch.stack([cropped_mask.squeeze(0).cpu()] * 3, dim=-1)
+            result_mask_image.append(mask_rgb)
+
+            preview_tensor, temp_info = _make_nb2_preview(sub_image[0].cpu(), cur_y, cur_x, cur_h, cur_w)
+            previews.append(preview_tensor.squeeze(0))
+            if i == 0 and temp_info:
+                preview_ui.append(temp_info)
+
+            infos.append({
+                "context_expand": context_expand,
+                "resize_mode": resize_mode,
+                "target_width": int(out_w),
+                "target_height": int(out_h),
+                "mask_bbox_x": int(cur_x),
+                "mask_bbox_y": int(cur_y),
+                "mask_bbox_w": int(cur_w),
+                "mask_bbox_h": int(cur_h),
+                "crop_canvas_x": int(ctc_x),
+                "crop_canvas_y": int(ctc_y),
+                "crop_canvas_w": int(ctc_w),
+                "crop_canvas_h": int(ctc_h),
+            })
+
+        result = {
+            "result": (
+                result_stitcher,
+                torch.stack(result_image, dim=0),
+                torch.stack(result_mask, dim=0),
+                torch.stack(result_mask_image, dim=0),
+                torch.stack(previews, dim=0),
+                str(infos[0] if len(infos) == 1 else {"batch_count": len(infos), "first": infos[0]}),
+            )
+        }
+        if preview_ui:
+            result["ui"] = {"nb2_preview": preview_ui}
+        return result
+
+
+class SmartMaskStitch:
+    """
+    Stitch a locally edited masked crop back into the original image.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "stitcher": ("STITCHER",),
+                "edited_image": ("IMAGE",),
+                "edge_feather_percent": ("FLOAT", {
+                    "default": 3.0, "min": 0.0, "max": 50.0, "step": 0.1,
+                    "tooltip": "Extra feather applied to the local crop edge."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "smart_mask_stitch"
+    CATEGORY = "inpaint/masked"
+    DESCRIPTION = (
+        "Stitches a locally edited masked crop back into the original image "
+        "using the stored local mask as the primary blend."
+    )
+
+    def smart_mask_stitch(self, stitcher, edited_image, edge_feather_percent):
+        edited_image = edited_image.clone()
+
+        device_mode = stitcher.get('device_mode', 'cpu (compatible)')
+        if device_mode == "gpu (much faster)":
+            device = comfy.model_management.get_torch_device()
+            edited_image = edited_image.to(device)
+            processor = GPUProcessorLogic()
+        else:
+            device = torch.device("cpu")
+            processor = CPUProcessorLogic()
+
+        downscale_algorithm = stitcher['downscale_algorithm']
+        upscale_algorithm = stitcher['upscale_algorithm']
+        canvas_images = [t.to(device) if torch.is_tensor(t) else t
+                         for t in stitcher['canvas_image']]
+        blend_masks = [t.to(device) if torch.is_tensor(t) else t
+                       for t in stitcher['cropped_mask_for_blend']]
+
+        batch_size = edited_image.shape[0]
+        n_stitchers = len(stitcher['cropped_to_canvas_x'])
+        assert n_stitchers == batch_size or n_stitchers == 1, \
+            "Stitch batch size doesn't match image batch size"
+        override = (n_stitchers == 1 and batch_size > 1)
+
+        results = []
+        for i in range(batch_size):
+            idx = 0 if override else i
+            one_image = edited_image[i:i+1]
+            one_mask = blend_masks[idx]
+            if one_mask.ndim == 2:
+                one_mask = one_mask.unsqueeze(0)
+
+            ctc_x = stitcher['cropped_to_canvas_x'][idx]
+            ctc_y = stitcher['cropped_to_canvas_y'][idx]
+            ctc_w = stitcher['cropped_to_canvas_w'][idx]
+            ctc_h = stitcher['cropped_to_canvas_h'][idx]
+            cto_x = stitcher['canvas_to_orig_x'][idx]
+            cto_y = stitcher['canvas_to_orig_y'][idx]
+            cto_w = stitcher['canvas_to_orig_w'][idx]
+            cto_h = stitcher['canvas_to_orig_h'][idx]
+            canvas = canvas_images[idx].clone()
+
+            out = self._stitch_single(
+                canvas, one_image, one_mask,
+                ctc_x, ctc_y, ctc_w, ctc_h,
+                cto_x, cto_y, cto_w, cto_h,
+                downscale_algorithm, upscale_algorithm,
+                edge_feather_percent, device, processor
+            )
+            results.append(out.squeeze(0))
+
+        return (torch.stack(results, dim=0).cpu(),)
+
+    def _stitch_single(self, canvas_image, edited_image, local_mask,
+                       ctc_x, ctc_y, ctc_w, ctc_h,
+                       cto_x, cto_y, cto_w, cto_h,
+                       downscale_algo, upscale_algo,
+                       edge_feather_percent, device, processor):
+        canvas_image = canvas_image.clone()
+
+        n_channels = edited_image.shape[-1]
+        if n_channels == 4:
+            alpha_raw = edited_image[..., 3:4]
+            rgb = edited_image[..., :3]
+        else:
+            alpha_raw = None
+            rgb = edited_image
+
+        B, h, w, _ = rgb.shape
+        if ctc_w > w or ctc_h > h:
+            resized_rgb = processor.rescale_i(rgb, ctc_w, ctc_h, upscale_algo)
+            resized_mask = processor.rescale_m(local_mask, ctc_w, ctc_h, upscale_algo)
+        else:
+            resized_rgb = processor.rescale_i(rgb, ctc_w, ctc_h, downscale_algo)
+            resized_mask = processor.rescale_m(local_mask, ctc_w, ctc_h, downscale_algo)
+
+        resized_mask = resized_mask.clamp(0, 1)
+
+        feather_h_px = int(ctc_h * edge_feather_percent / 100.0)
+        feather_w_px = int(ctc_w * edge_feather_percent / 100.0)
+        feather = make_smoothstep_feather(ctc_h, ctc_w, feather_h_px, feather_w_px, device)
+        blend_mask = resized_mask * feather.unsqueeze(0)
+
+        if alpha_raw is not None:
+            alpha_m = alpha_raw.squeeze(-1)
+            if ctc_w > alpha_m.shape[2] or ctc_h > alpha_m.shape[1]:
+                resized_alpha = processor.rescale_m(alpha_m, ctc_w, ctc_h, upscale_algo)
+            else:
+                resized_alpha = processor.rescale_m(alpha_m, ctc_w, ctc_h, downscale_algo)
+            blend_mask = blend_mask * resized_alpha.clamp(0, 1)
+
+        blend_mask = blend_mask.unsqueeze(-1)
+
+        canvas_crop_full = canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w]
+        canvas_crop_rgb = canvas_crop_full[..., :3]
+        blended_rgb = blend_mask * resized_rgb + (1.0 - blend_mask) * canvas_crop_rgb
+
+        if canvas_image.shape[-1] == 4:
+            canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = torch.cat(
+                [blended_rgb, canvas_crop_full[..., 3:4]], dim=-1
+            )
+        else:
+            canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = blended_rgb
+
+        return canvas_image[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w, :3]
 
 
 # ===========================================================================
@@ -1479,6 +1803,8 @@ class NB2AddAlpha:
 NODE_CLASS_MAPPINGS = {
     "NanoBanana2MaskGen":  NanoBanana2MaskGen,
     "NB2SmartRegionMask":  NB2SmartRegionMask,
+    "SmartMaskCrop":       SmartMaskCrop,
+    "SmartMaskStitch":     SmartMaskStitch,
     "InpaintCropNB2":      InpaintCropNB2,
     "InpaintStitchNB2":    InpaintStitchNB2,
     "NB2AddAlpha":         NB2AddAlpha,
@@ -1487,6 +1813,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NanoBanana2MaskGen":  "🎯 NB2 Mask Generator",
     "NB2SmartRegionMask":  "🧠 NB2 Smart Region",
+    "SmartMaskCrop":       "🪄 Smart Mask Crop",
+    "SmartMaskStitch":     "🪄 Smart Mask Stitch",
     "InpaintCropNB2":      "✂️ NB2 Crop",
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
