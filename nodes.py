@@ -1163,6 +1163,34 @@ def _grow_and_feather_mask(mask_2d: torch.Tensor,
     return torch.from_numpy(mask_float).to(mask_2d.device, dtype=torch.float32).clamp(0, 1)
 
 
+def _soft_blur_mask(mask_2d: torch.Tensor, blur_percent: float) -> torch.Tensor:
+    blur_percent = max(0.0, float(blur_percent))
+    if blur_percent <= 0.0:
+        return mask_2d.clamp(0, 1)
+
+    mask_np = mask_2d.detach().cpu().numpy().astype(np.float32)
+    ys, xs = np.nonzero(mask_np > 0.001)
+    if len(xs) == 0 or len(ys) == 0:
+        return mask_2d.clamp(0, 1)
+
+    box_w = max(1, int(xs.max() - xs.min() + 1))
+    box_h = max(1, int(ys.max() - ys.min() + 1))
+    blur_px = max(box_w, box_h) * (blur_percent / 100.0)
+    blurred = gaussian_filter(mask_np, sigma=max(0.5, blur_px / 3.0), mode="reflect")
+    max_before = float(mask_np.max())
+    max_after = float(blurred.max())
+    if max_before > 0.0 and max_after > 0.0:
+        blurred = blurred * (max_before / max_after)
+
+    return torch.from_numpy(blurred).to(mask_2d.device, dtype=torch.float32).clamp(0, 1)
+
+
+def _blur_uint8_mask(mask_uint8: np.ndarray, blur_percent: float) -> np.ndarray:
+    mask_float = torch.from_numpy(mask_uint8.astype(np.float32) / 255.0)
+    blurred = _soft_blur_mask(mask_float, blur_percent)
+    return np.clip(blurred.cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+
+
 def _parse_edit_size(size_value: str) -> tuple[int, int]:
     size_value = _coerce_text_value(size_value)
     match = re.fullmatch(r"(\d+)x(\d+)", size_value)
@@ -1499,6 +1527,12 @@ class SmartMaskCrop:
                         "Florence2Run (kijai). Disable only if your mask is already "
                         "at the exact source image resolution."
                     )}),
+                "use_region_mask_defaults": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": (
+                        "When enabled, 0 mask expand/feather values use Florence "
+                        "region defaults. Disable it when you need a hard mask."
+                    )}),
             },
             "optional": {
                 "region_info": ("STRING",),
@@ -1517,7 +1551,8 @@ class SmartMaskCrop:
     def smart_mask_crop(self, image, mask, context_expand, use_region_guidance,
                         mask_expand_percent, mask_feather_percent, resize_mode,
                         target_width, target_height, downscale_algorithm,
-                        upscale_algorithm, device_mode, depad_florence=True, region_info=""):
+                        upscale_algorithm, device_mode, depad_florence=True,
+                        region_info="", use_region_mask_defaults=True):
         image = image.clone()
         mask = mask.clone()
         if device_mode == "gpu (much faster)":
@@ -1544,9 +1579,11 @@ class SmartMaskCrop:
                 context_expand_effective = max(context_expand_effective, float(region_context["recommended_context_expand"]))
             if resize_mode == "resize_to_target" and region_context.get("recommended_edit_size"):
                 target_width_effective, target_height_effective = _parse_edit_size(region_context["recommended_edit_size"])
-            if mask_expand_effective <= 0.0 and region_context.get("recommended_mask_expand_percent", 0.0) > 0.0:
+            if (use_region_mask_defaults and mask_expand_effective <= 0.0
+                    and region_context.get("recommended_mask_expand_percent", 0.0) > 0.0):
                 mask_expand_effective = float(region_context["recommended_mask_expand_percent"])
-            if mask_feather_effective <= 0.0 and region_context.get("recommended_mask_feather_percent", 0.0) > 0.0:
+            if (use_region_mask_defaults and mask_feather_effective <= 0.0
+                    and region_context.get("recommended_mask_feather_percent", 0.0) > 0.0):
                 mask_feather_effective = float(region_context["recommended_mask_feather_percent"])
 
         result_stitcher = {
@@ -1667,6 +1704,7 @@ class SmartMaskCrop:
                 "target_height": int(out_h),
                 "mask_expand_percent": float(mask_expand_effective),
                 "mask_feather_percent": float(mask_feather_effective),
+                "use_region_mask_defaults": bool(use_region_mask_defaults),
                 "mask_bbox_x": int(cur_x),
                 "mask_bbox_y": int(cur_y),
                 "mask_bbox_w": int(cur_w),
@@ -1707,6 +1745,9 @@ class SmartMaskStitch:
                 "edge_feather_percent": ("FLOAT", {
                     "default": 3.0, "min": 0.0, "max": 50.0, "step": 0.1,
                     "tooltip": "Extra feather applied to the local crop edge."}),
+                "result_mask_feather_percent": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5,
+                    "tooltip": "Softens the stored local mask used to blend the edited result back."}),
             }
         }
 
@@ -1719,7 +1760,8 @@ class SmartMaskStitch:
         "using the stored local mask as the primary blend."
     )
 
-    def smart_mask_stitch(self, stitcher, edited_image, edge_feather_percent):
+    def smart_mask_stitch(self, stitcher, edited_image, edge_feather_percent,
+                          result_mask_feather_percent=0.0):
         edited_image = edited_image.clone()
 
         device_mode = stitcher.get('device_mode', 'cpu (compatible)')
@@ -1766,8 +1808,8 @@ class SmartMaskStitch:
                 canvas, one_image, one_mask,
                 ctc_x, ctc_y, ctc_w, ctc_h,
                 cto_x, cto_y, cto_w, cto_h,
-                downscale_algorithm, upscale_algorithm,
-                edge_feather_percent, device, processor
+                downscale_algorithm, upscale_algorithm, edge_feather_percent,
+                result_mask_feather_percent, device, processor
             )
             results.append(out.squeeze(0))
 
@@ -1777,7 +1819,8 @@ class SmartMaskStitch:
                        ctc_x, ctc_y, ctc_w, ctc_h,
                        cto_x, cto_y, cto_w, cto_h,
                        downscale_algo, upscale_algo,
-                       edge_feather_percent, device, processor):
+                       edge_feather_percent, result_mask_feather_percent,
+                       device, processor):
         canvas_image = canvas_image.clone()
 
         n_channels = edited_image.shape[-1]
@@ -1797,6 +1840,11 @@ class SmartMaskStitch:
             resized_mask = processor.rescale_m(local_mask, ctc_w, ctc_h, downscale_algo)
 
         resized_mask = resized_mask.clamp(0, 1)
+        if result_mask_feather_percent > 0.0:
+            resized_mask = torch.stack([
+                _soft_blur_mask(resized_mask[j], result_mask_feather_percent)
+                for j in range(resized_mask.shape[0])
+            ], dim=0)
 
         feather_h_px = int(ctc_h * edge_feather_percent / 100.0)
         feather_w_px = int(ctc_w * edge_feather_percent / 100.0)
@@ -2280,6 +2328,16 @@ class NB2Florence2RegionSelector:
                         "placeholder": "Environment variable fallback",
                     },
                 ),
+                "mask_blur_percent": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "tooltip": "Soft blur applied to the returned Florence mask.",
+                    },
+                ),
             },
         }
 
@@ -2712,6 +2770,7 @@ class NB2Florence2RegionSelector:
         return_rect_mask=False,
         api_key="",
         api_key_env_var="FAL_KEY",
+        mask_blur_percent=0.0,
     ):
         try:
             if not isinstance(image, torch.Tensor):
@@ -2781,6 +2840,8 @@ class NB2Florence2RegionSelector:
                 output_mask_uint8 = self._rect_mask_from_bbox(width, height, padded_bbox)
             else:
                 output_mask_uint8 = mask_uint8.copy()
+            if mask_blur_percent > 0.0:
+                output_mask_uint8 = _blur_uint8_mask(output_mask_uint8, mask_blur_percent)
 
             center_x = int(round((padded_bbox[0] + padded_bbox[2]) / 2.0))
             center_y = int(round((padded_bbox[1] + padded_bbox[3]) / 2.0))
@@ -2796,6 +2857,7 @@ class NB2Florence2RegionSelector:
                 "source": source,
                 "selection_mode": selection_mode,
                 "padding_percent": padding_percent,
+                "mask_blur_percent": float(mask_blur_percent),
                 "api_key_source": api_key_source,
                 "recommended_aspect_ratio": recommended_aspect_ratio,
                 "recommended_edit_size": region_edit_hints["edit_size"],

@@ -63,6 +63,7 @@ External Florence-2 region selector integrated into this repo. It calls FAL's Fl
 | return_rect_mask | BOOLEAN | Return a rectangular bbox mask instead of the raw semantic mask |
 | api_key | STRING | Optional direct API key input. Leave blank if using an env var |
 | api_key_env_var | STRING | Env var name fallback, default `FAL_KEY` |
+| mask_blur_percent | FLOAT | Optional soft blur applied to the returned mask |
 
 Outputs: `mask`, `mask_image`, `info`, `center_x`, `center_y`, `crop_width`, `crop_height`
 
@@ -215,6 +216,7 @@ Local masked-edit crop for models that accept a real mask (e.g. GPT Image). Use 
 | upscale_algorithm | choice | Resize-up algorithm |
 | device_mode | choice | CPU or GPU |
 | depad_florence | BOOLEAN | Remove Florence2 letterbox padding (default `True`) |
+| use_region_mask_defaults | BOOLEAN | When enabled, `0` expand/feather uses Florence defaults; disable it to keep a hard mask |
 | region_info | STRING | Optional Florence `info` output for shared aspect, mask, and sizing hints |
 
 Outputs: `stitcher`, `cropped_image`, `cropped_mask`, `cropped_mask_image`, `preview_image`, `info`
@@ -237,6 +239,7 @@ Pastes a locally edited masked crop back into the original image using the store
 | stitcher | STITCHER | Coordinate data from `Smart Mask Crop` |
 | edited_image | IMAGE | Output of the local masked editor |
 | edge_feather_percent | FLOAT | Extra edge feather for the crop boundary |
+| result_mask_feather_percent | FLOAT | Extra blur on the stored local mask used for final blending |
 
 Outputs: `image`
 
