@@ -2972,7 +2972,7 @@ class NB2OpenAIImageEdit:
 
     MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
     QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
-    SIZE_MODE_OPTIONS = ["auto_from_input", "auto_from_region", "manual"]
+    SIZE_MODE_OPTIONS = ["auto_from_input", "max_from_input_aspect", "auto_from_region", "manual"]
     SIZE_OPTIONS = ["auto", "1024x768", "1024x1024", "1024x1536", "1920x1080", "2560x1440", "3840x2160"]
     BACKGROUND_OPTIONS = ["auto", "opaque", "transparent"]
     FORMAT_OPTIONS = ["png", "webp", "jpeg"]
@@ -2987,7 +2987,7 @@ class NB2OpenAIImageEdit:
                     "multiline": True,
                     "default": "Retouch only the masked region. Preserve the rest of the image.",
                 }),
-                "model": (cls.MODEL_OPTIONS, {"default": "gpt-image-2"}),
+                "model": (cls.MODEL_OPTIONS, {"default": "openai/gpt-image-2/edit"}),
                 "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
                 "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_input"}),
                 "size": (cls.SIZE_OPTIONS, {"default": "auto"}),
@@ -3134,9 +3134,29 @@ class NB2OpenAIImageEdit:
             return None
         return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
 
-    def _resolve_size(self, size_mode, size, region_info, mask_image):
+    def _max_size_from_input_aspect(self, input_size):
+        source_w, source_h = input_size
+        source_w = max(1, int(source_w))
+        source_h = max(1, int(source_h))
+        max_edge = 3840
+        max_pixels = 8294400
+
+        scale = min(
+            max_edge / float(source_w),
+            max_edge / float(source_h),
+            math.sqrt(max_pixels / float(source_w * source_h)),
+        )
+        target_w = max(16, int(math.floor(source_w * scale / 16.0) * 16))
+        target_h = max(16, int(math.floor(source_h * scale / 16.0) * 16))
+        return {"width": target_w, "height": target_h}
+
+    def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None):
         if size_mode == "auto_from_input":
             return "auto", "input_image"
+        if size_mode == "max_from_input_aspect":
+            if not input_size:
+                return size, "manual_fallback"
+            return self._max_size_from_input_aspect(input_size), "max_from_input_aspect"
         if size_mode != "auto_from_region":
             return size, "manual"
 
@@ -3159,6 +3179,11 @@ class NB2OpenAIImageEdit:
         return size, "manual_fallback"
 
     def _format_image_size(self, resolved_size):
+        if isinstance(resolved_size, dict):
+            return {
+                "width": int(resolved_size["width"]),
+                "height": int(resolved_size["height"]),
+            }
         size_value = _coerce_text_value(resolved_size)
         if not size_value or size_value == "auto":
             return "auto"
@@ -3318,7 +3343,6 @@ class NB2OpenAIImageEdit:
                 "OPENAI_API_KEY",
                 "OpenAI",
             )
-            resolved_size, size_source = self._resolve_size(size_mode, size, region_info, mask_image)
 
             input_images = [
                 image_1,
@@ -3342,6 +3366,14 @@ class NB2OpenAIImageEdit:
             if image_size is None:
                 raise ValueError("image_1 is required.")
 
+            resolved_size, size_source = self._resolve_size(
+                size_mode,
+                size,
+                region_info,
+                mask_image,
+                input_size=image_size,
+            )
+
             mask_url = None
             if mask_image is not None:
                 mask_bytes = self._mask_tensor_to_png_bytes(mask_image, image_size)
@@ -3351,14 +3383,15 @@ class NB2OpenAIImageEdit:
                 "prompt": _coerce_text_value(prompt),
                 "image_urls": image_urls,
                 "openai_api_key": resolved_openai_api_key,
-                "quality": quality,
                 "image_size": self._format_image_size(resolved_size),
                 "background": background,
                 "output_format": output_format,
                 "moderation": moderation,
             }
+            if quality != "auto":
+                arguments["quality"] = quality
             if mask_url:
-                arguments["mask_image_url"] = mask_url
+                arguments["mask_url"] = mask_url
             if output_format in ("jpeg", "webp"):
                 arguments["output_compression"] = int(output_compression)
 
@@ -3392,6 +3425,183 @@ class NB2OpenAIImageEdit:
             raise RuntimeError(f"OpenAI image edit failed: {error_summary}") from e
 
 
+class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
+    """
+    Edit images with Nano Banana 2 through FAL, with per-node API key inputs.
+    """
+
+    ASPECT_RATIO_OPTIONS = [
+        "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1",
+        "4:5", "3:4", "2:3", "9:16", "4:1", "1:4", "8:1", "1:8",
+    ]
+    RESOLUTION_OPTIONS = ["0.5K", "1K", "2K", "4K"]
+    OUTPUT_FORMAT_OPTIONS = ["png", "jpeg", "webp"]
+    SAFETY_TOLERANCE_OPTIONS = ["1", "2", "3", "4", "5", "6"]
+    THINKING_LEVEL_OPTIONS = ["none", "minimal", "high"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_1": ("IMAGE",),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "Edit Image 1 using the connected reference images. Preserve the original identity, pose, lighting, and framing unless explicitly requested.",
+                }),
+            },
+            "optional": {
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
+                "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1}),
+                "aspect_ratio": (cls.ASPECT_RATIO_OPTIONS, {"default": "auto"}),
+                "resolution": (cls.RESOLUTION_OPTIONS, {"default": "2K"}),
+                "output_format": (cls.OUTPUT_FORMAT_OPTIONS, {"default": "png"}),
+                "safety_tolerance": (cls.SAFETY_TOLERANCE_OPTIONS, {"default": "4"}),
+                "limit_generations": ("BOOLEAN", {"default": True}),
+                "enable_web_search": ("BOOLEAN", {"default": False}),
+                "thinking_level": (cls.THINKING_LEVEL_OPTIONS, {"default": "none"}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "sync_mode": ("BOOLEAN", {"default": False}),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "Optional. Leave blank to use FAL_KEY",
+                }),
+                "api_key_env_var": ("STRING", {
+                    "multiline": False,
+                    "default": "FAL_KEY",
+                    "placeholder": "FAL environment variable fallback",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "info")
+    FUNCTION = "edit_image"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Edits one base image with up to five references through FAL's "
+        "Nano Banana 2 edit endpoint."
+    )
+
+    def _extract_result_image_urls(self, result):
+        if not isinstance(result, dict):
+            return []
+        urls = []
+        candidates = result.get("images") or result.get("data") or []
+        for item in candidates:
+            if isinstance(item, dict):
+                url = _coerce_text_value(item.get("url") or item.get("image_url"))
+                if url:
+                    urls.append(url)
+            elif isinstance(item, str):
+                url = _coerce_text_value(item)
+                if url:
+                    urls.append(url)
+        fallback = _coerce_text_value(result.get("image_url"))
+        if fallback:
+            urls.append(fallback)
+        return urls
+
+    def edit_image(
+        self,
+        image_1,
+        prompt,
+        image_2=None,
+        image_3=None,
+        image_4=None,
+        image_5=None,
+        image_6=None,
+        num_images=1,
+        aspect_ratio="auto",
+        resolution="2K",
+        output_format="png",
+        safety_tolerance="4",
+        limit_generations=True,
+        enable_web_search=False,
+        thinking_level="none",
+        seed=-1,
+        sync_mode=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+    ):
+        try:
+            fal_api_key, fal_api_key_source = self._resolve_api_key(
+                api_key,
+                api_key_env_var,
+                self._looks_like_fal_api_key,
+                "FAL_KEY",
+                "FAL",
+            )
+
+            input_images = [image_1, image_2, image_3, image_4, image_5, image_6]
+            image_urls = []
+            for input_image in input_images:
+                if input_image is None:
+                    continue
+                image_bytes, _ = self._image_tensor_to_png_bytes(input_image)
+                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            if not image_urls:
+                raise ValueError("image_1 is required.")
+
+            arguments = {
+                "prompt": _coerce_text_value(prompt),
+                "image_urls": image_urls,
+                "num_images": int(num_images),
+                "aspect_ratio": aspect_ratio,
+                "output_format": output_format,
+                "resolution": resolution,
+                "safety_tolerance": str(safety_tolerance),
+                "limit_generations": bool(limit_generations),
+                "enable_web_search": bool(enable_web_search),
+                "sync_mode": bool(sync_mode),
+            }
+            if seed != -1:
+                arguments["seed"] = int(seed)
+            if thinking_level != "none":
+                arguments["thinking_level"] = thinking_level
+
+            result = self._call_fal("fal-ai/nano-banana-2/edit", arguments, fal_api_key)
+            image_urls_out = self._extract_result_image_urls(result)
+            if not image_urls_out:
+                raise RuntimeError("FAL Nano Banana 2 edit returned no output image URL.")
+
+            output_images = [self._decode_image_result(url) for url in image_urls_out]
+            first_shape = output_images[0].shape
+            if all(image.shape == first_shape for image in output_images):
+                output_batch = torch.cat(output_images, dim=0)
+            else:
+                output_batch = output_images[0]
+
+            info = {
+                "endpoint": "fal-ai/nano-banana-2/edit",
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+                "output_format": output_format,
+                "num_images": int(num_images),
+                "input_image_count": len(image_urls),
+                "output_image_count": len(image_urls_out),
+                "fal_api_key_source": fal_api_key_source,
+                "safety_tolerance": str(safety_tolerance),
+                "limit_generations": bool(limit_generations),
+                "enable_web_search": bool(enable_web_search),
+                "thinking_level": thinking_level,
+                "output_image_urls": image_urls_out,
+                "description": result.get("description") if isinstance(result, dict) else None,
+            }
+            if output_batch.shape[0] != len(image_urls_out):
+                info["warning"] = "Output images had different sizes; returned only the first image."
+
+            return (output_batch.cpu(), json.dumps(info))
+        except Exception as e:
+            error_summary = _summarize_remote_error(e)
+            logger.error("Nano Banana 2 edit failed: %s", error_summary)
+            raise RuntimeError(f"Nano Banana 2 edit failed: {error_summary}") from e
+
+
 # ===========================================================================
 #  ComfyUI registration
 # ===========================================================================
@@ -3406,6 +3616,7 @@ NODE_CLASS_MAPPINGS = {
     "NB2AddAlpha":         NB2AddAlpha,
     "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
     "NB2OpenAIImageEdit": NB2OpenAIImageEdit,
+    "NB2NanoBanana2Edit": NB2NanoBanana2Edit,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3418,4 +3629,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
     "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
     "NB2OpenAIImageEdit": "OpenAI GPT Image Edit",
+    "NB2NanoBanana2Edit": "Nano Banana 2 Edit (FAL API)",
 }

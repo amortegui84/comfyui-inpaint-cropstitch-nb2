@@ -138,7 +138,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | prompt | STRING | Edit instruction |
 | model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
-| size_mode | choice | `auto_from_input`, `auto_from_region`, or `manual` |
+| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `auto_from_region`, or `manual` |
 | size | choice | `auto`, `1024x768`, `1024x1024`, `1024x1536`, `1920x1080`, `2560x1440`, `3840x2160` |
 | background | choice | `auto`, `opaque`, `transparent` |
 | output_format | choice | `png`, `webp`, `jpeg` |
@@ -162,7 +162,34 @@ NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -
 Recommended default:
 
 - Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
+- Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
 - Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
+
+---
+
+### Nano Banana 2 Edit
+
+FAL Nano Banana 2 edit node included in this repo. It calls `fal-ai/nano-banana-2/edit`, accepts a base image plus up to five reference images, and exposes the FAL API key as node inputs instead of relying on another node package's integrated config.
+
+| Input | Type | Description |
+|---|---|---|
+| image_1 | IMAGE | Base image to edit |
+| prompt | STRING | Edit instruction |
+| image_2 ... image_6 | IMAGE | Optional reference images |
+| num_images | INT | Number of outputs to request |
+| aspect_ratio | choice | `auto`, common ratios, and extreme ratios supported by FAL |
+| resolution | choice | `0.5K`, `1K`, `2K`, `4K` |
+| output_format | choice | `png`, `jpeg`, `webp` |
+| safety_tolerance | choice | `1` to `6` |
+| limit_generations | BOOLEAN | Ask the model to limit generations from each round |
+| enable_web_search | BOOLEAN | Allow web search during generation |
+| thinking_level | choice | `none`, `minimal`, `high` |
+| seed | INT | Optional seed; `-1` omits it |
+| sync_mode | BOOLEAN | Return media directly when supported by FAL |
+| api_key | STRING | Optional direct FAL API key input |
+| api_key_env_var | STRING | FAL env var fallback, default `FAL_KEY` |
+
+Outputs: `images`, `info`
 
 ---
 
