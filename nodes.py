@@ -2972,8 +2972,22 @@ class NB2OpenAIImageEdit:
 
     MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
     QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
-    SIZE_MODE_OPTIONS = ["auto_from_input", "max_from_input_aspect", "auto_from_region", "manual"]
-    SIZE_OPTIONS = ["auto", "1024x768", "1024x1024", "1024x1536", "1920x1080", "2560x1440", "3840x2160"]
+    SIZE_MODE_OPTIONS = ["auto_from_input", "max_from_input_aspect", "preset", "custom", "auto_from_region", "manual"]
+    SIZE_OPTIONS = [
+        "auto",
+        "square_hd",
+        "square",
+        "portrait_4_3",
+        "portrait_16_9",
+        "landscape_4_3",
+        "landscape_16_9",
+        "1024x768",
+        "1024x1024",
+        "1024x1536",
+        "1920x1080",
+        "2560x1440",
+        "3840x2160",
+    ]
     BACKGROUND_OPTIONS = ["auto", "opaque", "transparent"]
     FORMAT_OPTIONS = ["png", "webp", "jpeg"]
     MODERATION_OPTIONS = ["auto", "low"]
@@ -3020,6 +3034,8 @@ class NB2OpenAIImageEdit:
                 "mask_image": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "region_info": ("STRING",),
+                "custom_width": ("INT", {"default": 3840, "min": 512, "max": 3840, "step": 16}),
+                "custom_height": ("INT", {"default": 2160, "min": 512, "max": 3840, "step": 16}),
                 "image_3": ("IMAGE",),
                 "image_4": ("IMAGE",),
                 "image_5": ("IMAGE",),
@@ -3150,13 +3166,40 @@ class NB2OpenAIImageEdit:
         target_h = max(16, int(math.floor(source_h * scale / 16.0) * 16))
         return {"width": target_w, "height": target_h}
 
-    def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None):
+    def _normalize_custom_size(self, width, height):
+        width = max(512, min(3840, int(width)))
+        height = max(512, min(3840, int(height)))
+        width = max(512, int(math.floor(width / 16.0) * 16))
+        height = max(512, int(math.floor(height / 16.0) * 16))
+
+        max_pixels = 8294400
+        ratio = max(width / float(height), height / float(width))
+        if ratio > 3.0:
+            if width > height:
+                width = int(math.floor((height * 3.0) / 16.0) * 16)
+            else:
+                height = int(math.floor((width * 3.0) / 16.0) * 16)
+
+        pixels = width * height
+        if pixels > max_pixels:
+            scale = math.sqrt(max_pixels / float(pixels))
+            width = max(512, int(math.floor(width * scale / 16.0) * 16))
+            height = max(512, int(math.floor(height * scale / 16.0) * 16))
+
+        return {"width": width, "height": height}
+
+    def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None,
+                      custom_width=3840, custom_height=2160):
         if size_mode == "auto_from_input":
             return "auto", "input_image"
         if size_mode == "max_from_input_aspect":
             if not input_size:
                 return size, "manual_fallback"
             return self._max_size_from_input_aspect(input_size), "max_from_input_aspect"
+        if size_mode == "custom":
+            return self._normalize_custom_size(custom_width, custom_height), "custom"
+        if size_mode == "preset":
+            return size, "preset"
         if size_mode != "auto_from_region":
             return size, "manual"
 
@@ -3187,6 +3230,15 @@ class NB2OpenAIImageEdit:
         size_value = _coerce_text_value(resolved_size)
         if not size_value or size_value == "auto":
             return "auto"
+        if size_value in {
+            "square_hd",
+            "square",
+            "portrait_4_3",
+            "portrait_16_9",
+            "landscape_4_3",
+            "landscape_16_9",
+        }:
+            return size_value
         match = re.fullmatch(r"(\d+)x(\d+)", size_value)
         if not match:
             raise ValueError(f"Unsupported image size value: {resolved_size}")
@@ -3320,6 +3372,8 @@ class NB2OpenAIImageEdit:
         openai_api_key_env_var="OPENAI_API_KEY",
         mask_image=None,
         image_2=None,
+        custom_width=3840,
+        custom_height=2160,
         image_3=None,
         image_4=None,
         image_5=None,
@@ -3372,6 +3426,8 @@ class NB2OpenAIImageEdit:
                 region_info,
                 mask_image,
                 input_size=image_size,
+                custom_width=custom_width,
+                custom_height=custom_height,
             )
 
             mask_url = None
@@ -3379,11 +3435,13 @@ class NB2OpenAIImageEdit:
                 mask_bytes = self._mask_tensor_to_png_bytes(mask_image, image_size)
                 mask_url = self._upload_to_fal(mask_bytes, "image/png", fal_api_key)
 
+            prompt_sent = _coerce_text_value(prompt)
+            image_size_sent = self._format_image_size(resolved_size)
             arguments = {
-                "prompt": _coerce_text_value(prompt),
+                "prompt": prompt_sent,
                 "image_urls": image_urls,
                 "openai_api_key": resolved_openai_api_key,
-                "image_size": self._format_image_size(resolved_size),
+                "image_size": image_size_sent,
                 "background": background,
                 "output_format": output_format,
                 "moderation": moderation,
@@ -3401,12 +3459,20 @@ class NB2OpenAIImageEdit:
                 raise RuntimeError("FAL GPT Image edit returned no output image URL.")
 
             output_image = self._decode_image_result(image_url)
+            output_height = int(output_image.shape[1])
+            output_width = int(output_image.shape[2])
             info = {
                 "model": model,
                 "quality": quality,
+                "prompt_sent": prompt_sent,
                 "size_mode": size_mode,
                 "resolved_size": resolved_size,
+                "image_size_sent": image_size_sent,
                 "size_source": size_source,
+                "input_width": int(image_size[0]),
+                "input_height": int(image_size[1]),
+                "output_width": output_width,
+                "output_height": output_height,
                 "background": background,
                 "output_format": output_format,
                 "moderation": moderation,

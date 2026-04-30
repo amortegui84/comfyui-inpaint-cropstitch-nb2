@@ -138,8 +138,8 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | prompt | STRING | Edit instruction |
 | model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
-| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `auto_from_region`, or `manual` |
-| size | choice | `auto`, `1024x768`, `1024x1024`, `1024x1536`, `1920x1080`, `2560x1440`, `3840x2160` |
+| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `preset`, `custom`, `auto_from_region`, or `manual` |
+| size | choice | FAL presets such as `portrait_16_9`, `landscape_16_9`, plus legacy explicit sizes |
 | background | choice | `auto`, `opaque`, `transparent` |
 | output_format | choice | `png`, `webp`, `jpeg` |
 | output_compression | INT | Used for `webp` and `jpeg` outputs |
@@ -151,6 +151,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | mask_image | IMAGE | Optional mask image. If connected, the node converts it to an alpha mask automatically |
 | image_2 ... image_8 | IMAGE | Optional reference images sent together with `image_1` |
 | region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
+| custom_width / custom_height | INT | Used when `size_mode = custom`; rounded to FAL's 16-pixel grid and 4K limits |
 
 Outputs: `images`, `info`
 
@@ -163,6 +164,7 @@ Recommended default:
 
 - Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
+- Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
 - Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
 
 ---
