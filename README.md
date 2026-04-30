@@ -149,6 +149,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | openai_api_key | STRING | Optional direct OpenAI API key input passed through to FAL |
 | openai_api_key_env_var | STRING | OpenAI env var fallback, default `OPENAI_API_KEY` |
 | mask_image | IMAGE | Optional mask image. If connected, the node converts it to an alpha mask automatically |
+| image_2 ... image_8 | IMAGE | Optional reference images sent together with `image_1` |
 | region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
 
 Outputs: `images`, `info`

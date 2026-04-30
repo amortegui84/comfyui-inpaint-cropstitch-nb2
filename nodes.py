@@ -3005,6 +3005,12 @@ class NB2OpenAIImageEdit:
                 "mask_image": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "region_info": ("STRING",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
+                "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",),
+                "image_7": ("IMAGE",),
+                "image_8": ("IMAGE",),
             },
         }
 
@@ -3158,12 +3164,54 @@ class NB2OpenAIImageEdit:
             ) from e
         return fal_client
 
+    def _is_retryable_network_error(self, error):
+        text = str(error).lower()
+        retry_markers = (
+            "winerror 10054",
+            "forcibly closed",
+            "connection reset",
+            "connection aborted",
+            "remote host",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "502",
+            "503",
+            "504",
+        )
+        return any(marker in text for marker in retry_markers)
+
+    def _with_retries(self, label, operation, attempts=3):
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except Exception as e:
+                last_error = e
+                if attempt >= attempts or not self._is_retryable_network_error(e):
+                    raise
+                sleep_seconds = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    "GPT Image %s failed on attempt %s/%s: %s. Retrying in %ss.",
+                    label,
+                    attempt,
+                    attempts,
+                    str(e),
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+
+        raise last_error
+
     def _upload_to_fal(self, data_bytes, mime_type, fal_api_key):
         fal_client = self._get_fal_client()
         previous_key = os.environ.get("FAL_KEY")
         os.environ["FAL_KEY"] = fal_api_key
         try:
-            return fal_client.upload(data_bytes, mime_type)
+            return self._with_retries(
+                "image upload",
+                lambda: fal_client.upload(data_bytes, mime_type),
+            )
         finally:
             if previous_key is None:
                 os.environ.pop("FAL_KEY", None)
@@ -3175,7 +3223,10 @@ class NB2OpenAIImageEdit:
         previous_key = os.environ.get("FAL_KEY")
         os.environ["FAL_KEY"] = fal_api_key
         try:
-            result = fal_client.run(endpoint, arguments=arguments)
+            result = self._with_retries(
+                f"API call {endpoint}",
+                lambda: fal_client.run(endpoint, arguments=arguments),
+            )
             logger.debug("FAL GPT Image response from %s: %s", endpoint, json.dumps(result))
             return result
         except Exception as e:
@@ -3227,6 +3278,12 @@ class NB2OpenAIImageEdit:
         openai_api_key_env_var="OPENAI_API_KEY",
         mask_image=None,
         image_2=None,
+        image_3=None,
+        image_4=None,
+        image_5=None,
+        image_6=None,
+        image_7=None,
+        image_8=None,
         region_info="",
     ):
         try:
@@ -3246,11 +3303,27 @@ class NB2OpenAIImageEdit:
             )
             resolved_size, size_source = self._resolve_size(size_mode, size, region_info, mask_image)
 
-            image_1_bytes, image_size = self._image_tensor_to_png_bytes(image_1)
-            image_urls = [self._upload_to_fal(image_1_bytes, "image/png", fal_api_key)]
-            if image_2 is not None:
-                image_2_bytes, _ = self._image_tensor_to_png_bytes(image_2)
-                image_urls.append(self._upload_to_fal(image_2_bytes, "image/png", fal_api_key))
+            input_images = [
+                image_1,
+                image_2,
+                image_3,
+                image_4,
+                image_5,
+                image_6,
+                image_7,
+                image_8,
+            ]
+            image_urls = []
+            image_size = None
+            for index, input_image in enumerate(input_images, start=1):
+                if input_image is None:
+                    continue
+                image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
+                if index == 1:
+                    image_size = current_size
+                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            if image_size is None:
+                raise ValueError("image_1 is required.")
 
             mask_url = None
             if mask_image is not None:
@@ -3290,7 +3363,8 @@ class NB2OpenAIImageEdit:
                 "fal_api_key_source": fal_api_key_source,
                 "openai_api_key_source": openai_api_key_source,
                 "mask_used": mask_image is not None,
-                "reference_image_used": image_2 is not None,
+                "reference_image_count": max(0, len(image_urls) - 1),
+                "reference_image_used": len(image_urls) > 1,
                 "output_image_url": image_url,
                 "usage": result.get("usage") if isinstance(result, dict) else None,
             }
