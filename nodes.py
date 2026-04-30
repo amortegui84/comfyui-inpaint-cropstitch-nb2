@@ -42,6 +42,7 @@ import numpy as np
 import os
 import re
 import requests
+import time
 import uuid
 import torch
 import torch.nn.functional as TF
@@ -2338,6 +2339,16 @@ class NB2Florence2RegionSelector:
                         "tooltip": "Soft blur applied to the returned Florence mask.",
                     },
                 ),
+                "upload_max_dimension": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 512,
+                        "max": 4096,
+                        "step": 64,
+                        "tooltip": "Downscale longest image edge before upload. Lower this if FAL closes the connection.",
+                    },
+                ),
             },
         }
 
@@ -2427,6 +2438,45 @@ class NB2Florence2RegionSelector:
             ) from e
         return fal_client
 
+    def _is_retryable_network_error(self, error):
+        text = str(error).lower()
+        retry_markers = (
+            "winerror 10054",
+            "forcibly closed",
+            "connection reset",
+            "connection aborted",
+            "remote host",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "502",
+            "503",
+            "504",
+        )
+        return any(marker in text for marker in retry_markers)
+
+    def _with_retries(self, label, operation, attempts=3):
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except Exception as e:
+                last_error = e
+                if attempt >= attempts or not self._is_retryable_network_error(e):
+                    raise
+                sleep_seconds = min(2 ** (attempt - 1), 8)
+                logger.warning(
+                    "Florence %s failed on attempt %s/%s: %s. Retrying in %ss.",
+                    label,
+                    attempt,
+                    attempts,
+                    str(e),
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+
+        raise last_error
+
     def _normalize_image_array(self, image):
         if isinstance(image, torch.Tensor):
             image_np = image.detach().cpu().numpy()
@@ -2500,9 +2550,12 @@ class NB2Florence2RegionSelector:
                 image_tensor,
                 max_dimension=max_dimension,
             )
-            image_url = fal_client.upload(
-                img_bytes,
-                "image/png",
+            image_url = self._with_retries(
+                "image upload",
+                lambda: fal_client.upload(
+                    img_bytes,
+                    "image/png",
+                ),
             )
             return image_url, original_size, uploaded_size
         finally:
@@ -2516,7 +2569,10 @@ class NB2Florence2RegionSelector:
         previous_key = os.environ.get("FAL_KEY")
         os.environ["FAL_KEY"] = api_key
         try:
-            result = fal_client.run(endpoint, arguments=arguments)
+            result = self._with_retries(
+                f"API call {endpoint}",
+                lambda: fal_client.run(endpoint, arguments=arguments),
+            )
             logger.debug("FAL API response from %s: %s", endpoint, json.dumps(result))
             return result
         except Exception as e:
@@ -2771,6 +2827,7 @@ class NB2Florence2RegionSelector:
         api_key="",
         api_key_env_var="FAL_KEY",
         mask_blur_percent=0.0,
+        upload_max_dimension=2048,
     ):
         try:
             if not isinstance(image, torch.Tensor):
@@ -2789,7 +2846,7 @@ class NB2Florence2RegionSelector:
             image_url, original_size, uploaded_size = self._upload_image(
                 image,
                 resolved_api_key,
-                max_dimension=2048,
+                max_dimension=int(upload_max_dimension),
             )
             image_np = self._normalize_image_array(image[0:1])
             height, width = image_np.shape[:2]
@@ -2858,6 +2915,7 @@ class NB2Florence2RegionSelector:
                 "selection_mode": selection_mode,
                 "padding_percent": padding_percent,
                 "mask_blur_percent": float(mask_blur_percent),
+                "upload_max_dimension": int(upload_max_dimension),
                 "api_key_source": api_key_source,
                 "recommended_aspect_ratio": recommended_aspect_ratio,
                 "recommended_edit_size": region_edit_hints["edit_size"],

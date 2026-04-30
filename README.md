@@ -64,6 +64,7 @@ External Florence-2 region selector integrated into this repo. It calls FAL's Fl
 | api_key | STRING | Optional direct API key input. Leave blank if using an env var |
 | api_key_env_var | STRING | Env var name fallback, default `FAL_KEY` |
 | mask_blur_percent | FLOAT | Optional soft blur applied to the returned mask |
+| upload_max_dimension | INT | Longest edge before upload; lower to `1536` or `1024` if the remote host closes the connection |
 
 Outputs: `mask`, `mask_image`, `info`, `center_x`, `center_y`, `crop_width`, `crop_height`
 
