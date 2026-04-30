@@ -144,6 +144,18 @@ def _coerce_text_value(value):
     return str(value).strip()
 
 
+def _summarize_remote_error(error):
+    text = str(error).strip()
+    lower = text.lower()
+    if "<html" in lower and "internal server error" in lower:
+        return (
+            "Remote server returned 500 Internal Server Error. "
+            "This is a FAL/OpenAI-side failure, often transient or caused by a "
+            "request the gateway could not process."
+        )
+    return text
+
+
 def _safe_json_loads(value):
     if isinstance(value, dict):
         return value
@@ -2449,6 +2461,8 @@ class NB2Florence2RegionSelector:
             "timed out",
             "timeout",
             "temporarily unavailable",
+            "500",
+            "internal server error",
             "502",
             "503",
             "504",
@@ -2946,8 +2960,9 @@ class NB2Florence2RegionSelector:
                 crop_height,
             )
         except Exception as e:
-            logger.error("Florence region selection failed: %s", str(e))
-            raise RuntimeError(f"Florence region selection failed: {str(e)}") from e
+            error_summary = _summarize_remote_error(e)
+            logger.error("Florence region selection failed: %s", error_summary)
+            raise RuntimeError(f"Florence region selection failed: {error_summary}") from e
 
 
 class NB2OpenAIImageEdit:
@@ -3175,6 +3190,8 @@ class NB2OpenAIImageEdit:
             "timed out",
             "timeout",
             "temporarily unavailable",
+            "500",
+            "internal server error",
             "502",
             "503",
             "504",
@@ -3370,8 +3387,9 @@ class NB2OpenAIImageEdit:
             }
             return (output_image, json.dumps(info))
         except Exception as e:
-            logger.error("OpenAI image edit failed: %s", str(e))
-            raise RuntimeError(f"OpenAI image edit failed: {str(e)}") from e
+            error_summary = _summarize_remote_error(e)
+            logger.error("OpenAI image edit failed: %s", error_summary)
+            raise RuntimeError(f"OpenAI image edit failed: {error_summary}") from e
 
 
 # ===========================================================================
