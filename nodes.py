@@ -195,6 +195,34 @@ def _recommend_edit_size_for_aspect_ratio(aspect_ratio):
     return EDIT_SIZE_BY_ASPECT_RATIO.get(aspect_ratio, "1024x1024")
 
 
+def _normalize_gpt_image_size(width, height):
+    width = max(512, min(3840, int(width)))
+    height = max(512, min(3840, int(height)))
+    width = max(512, int(math.floor(width / 16.0) * 16))
+    height = max(512, int(math.floor(height / 16.0) * 16))
+
+    ratio = max(width / float(height), height / float(width))
+    if ratio > 3.0:
+        if width > height:
+            width = max(512, int(math.floor((height * 3.0) / 16.0) * 16))
+        else:
+            height = max(512, int(math.floor((width * 3.0) / 16.0) * 16))
+
+    min_pixels = 655_360
+    max_pixels = 8_294_400
+    pixels = width * height
+    if pixels < min_pixels:
+        scale = math.sqrt(min_pixels / float(pixels))
+        width = min(3840, max(512, int(math.ceil(width * scale / 16.0) * 16)))
+        height = min(3840, max(512, int(math.ceil(height * scale / 16.0) * 16)))
+    elif pixels > max_pixels:
+        scale = math.sqrt(max_pixels / float(pixels))
+        width = max(512, int(math.floor(width * scale / 16.0) * 16))
+        height = max(512, int(math.floor(height * scale / 16.0) * 16))
+
+    return int(width), int(height)
+
+
 def _get_region_edit_hints(region_type):
     region_type = _coerce_text_value(region_type)
     hints = REGION_EDIT_HINTS.get(region_type)
@@ -1486,7 +1514,7 @@ class NB2SmartRegionMask:
                 center_y_out[0],
                 crop_w_out[0],
                 crop_h_out[0],
-                str(infos[0] if len(infos) == 1 else {
+                json.dumps(infos[0] if len(infos) == 1 else {
                     "batch_count": len(infos),
                     "first": infos[0],
                 }),
@@ -1550,6 +1578,16 @@ class SmartMaskCrop:
                         "When enabled, 0 mask expand/feather values use Florence "
                         "region defaults. Disable it when you need a hard mask."
                     )}),
+                "edit_size_scale_percent": ("FLOAT", {
+                    "default": 100.0, "min": 25.0, "max": 200.0, "step": 5.0,
+                    "tooltip": (
+                        "Scale the edit output resolution as a percentage of the target. "
+                        "100 = full region recommended size (e.g. 2752x1536 for glasses). "
+                        "50 = half size, 150 = 150%%. "
+                        "Preserves aspect ratio. The scaled size flows via info to GPT Image "
+                        "nodes using auto_from_region, so both crop and output stay aligned."
+                    ),
+                }),
             },
             "optional": {
                 "region_info": ("STRING",),
@@ -1569,7 +1607,8 @@ class SmartMaskCrop:
                         mask_expand_percent, mask_feather_percent, resize_mode,
                         target_width, target_height, downscale_algorithm,
                         upscale_algorithm, device_mode, depad_florence=True,
-                        region_info="", use_region_mask_defaults=True):
+                        region_info="", use_region_mask_defaults=True,
+                        edit_size_scale_percent=100.0):
         image = image.clone()
         mask = mask.clone()
         if device_mode == "gpu (much faster)":
@@ -1602,6 +1641,17 @@ class SmartMaskCrop:
             if (use_region_mask_defaults and mask_feather_effective <= 0.0
                     and region_context.get("recommended_mask_feather_percent", 0.0) > 0.0):
                 mask_feather_effective = float(region_context["recommended_mask_feather_percent"])
+
+        scale = float(edit_size_scale_percent) / 100.0
+        if abs(scale - 1.0) > 0.005:
+            raw_w = max(64, int(round(target_width_effective * scale / 16.0)) * 16)
+            raw_h = max(64, int(round(target_height_effective * scale / 16.0)) * 16)
+            target_width_effective, target_height_effective = _normalize_gpt_image_size(raw_w, raw_h)
+        else:
+            target_width_effective, target_height_effective = _normalize_gpt_image_size(
+                target_width_effective,
+                target_height_effective,
+            )
 
         result_stitcher = {
             'downscale_algorithm': downscale_algorithm,
@@ -1723,6 +1773,7 @@ class SmartMaskCrop:
                 "original_crop_height": int(rect_h),
                 "target_width": int(out_w),
                 "target_height": int(out_h),
+                "edit_size_scale_percent": float(edit_size_scale_percent),
                 "recommended_gpt_size_mode": "auto_from_region",
                 "recommended_gpt_high_quality_max_size": False,
                 "recommended_stitch_edge_feather_percent": 3.0,
@@ -1748,7 +1799,7 @@ class SmartMaskCrop:
                 torch.stack(result_mask, dim=0),
                 torch.stack(result_mask_image, dim=0),
                 torch.stack(previews, dim=0),
-                str(infos[0] if len(infos) == 1 else {"batch_count": len(infos), "first": infos[0]}),
+                json.dumps(infos[0] if len(infos) == 1 else {"batch_count": len(infos), "first": infos[0]}),
             )
         }
         if preview_ui:
@@ -3185,13 +3236,19 @@ class NB2OpenAIImageEdit:
 
     def _mask_tensor_to_png_bytes(self, mask_image, target_size):
         mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
+        mask_h, mask_w = mask_np.shape[:2]
+        target_w, target_h = target_size
+        if (mask_w, mask_h) != (target_w, target_h):
+            raise ValueError(
+                "GPT Image mask_image size must match image_1 exactly. "
+                f"Got mask {mask_w}x{mask_h} for image_1 {target_w}x{target_h}. "
+                "Connect SmartMaskCrop.cropped_mask_image to mask_image when image_1 is SmartMaskCrop.cropped_image."
+            )
         if mask_np.shape[-1] >= 3:
             mask_gray = np.max(mask_np[..., :3], axis=-1).astype(np.uint8)
         else:
             mask_gray = mask_np[..., 0].astype(np.uint8)
         mask = Image.fromarray(mask_gray, mode="L")
-        if mask.size != target_size:
-            mask = mask.resize(target_size, Image.NEAREST)
         mask_rgba = mask.convert("RGBA")
         mask_rgba.putalpha(mask)
         buf = io.BytesIO()
@@ -3213,38 +3270,19 @@ class NB2OpenAIImageEdit:
         source_w, source_h = input_size
         source_w = max(1, int(source_w))
         source_h = max(1, int(source_h))
-        max_edge = 3840
-        max_pixels = 8294400
-
         scale = min(
-            max_edge / float(source_w),
-            max_edge / float(source_h),
-            math.sqrt(max_pixels / float(source_w * source_h)),
+            3840 / float(source_w),
+            3840 / float(source_h),
+            math.sqrt(8_294_400 / float(source_w * source_h)),
         )
-        target_w = max(16, int(math.floor(source_w * scale / 16.0) * 16))
-        target_h = max(16, int(math.floor(source_h * scale / 16.0) * 16))
+        target_w, target_h = _normalize_gpt_image_size(
+            source_w * scale,
+            source_h * scale,
+        )
         return {"width": target_w, "height": target_h}
 
     def _normalize_custom_size(self, width, height):
-        width = max(512, min(3840, int(width)))
-        height = max(512, min(3840, int(height)))
-        width = max(512, int(math.floor(width / 16.0) * 16))
-        height = max(512, int(math.floor(height / 16.0) * 16))
-
-        max_pixels = 8294400
-        ratio = max(width / float(height), height / float(width))
-        if ratio > 3.0:
-            if width > height:
-                width = int(math.floor((height * 3.0) / 16.0) * 16)
-            else:
-                height = int(math.floor((width * 3.0) / 16.0) * 16)
-
-        pixels = width * height
-        if pixels > max_pixels:
-            scale = math.sqrt(max_pixels / float(pixels))
-            width = max(512, int(math.floor(width * scale / 16.0) * 16))
-            height = max(512, int(math.floor(height * scale / 16.0) * 16))
-
+        width, height = _normalize_gpt_image_size(width, height)
         return {"width": width, "height": height}
 
     def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None,
@@ -3264,14 +3302,22 @@ class NB2OpenAIImageEdit:
 
         region_context = _extract_region_context(region_info)
         if region_context.get("target_width", 0) > 0 and region_context.get("target_height", 0) > 0:
+            width, height = _normalize_gpt_image_size(
+                region_context["target_width"],
+                region_context["target_height"],
+            )
             return {
-                "width": int(region_context["target_width"]),
-                "height": int(region_context["target_height"]),
+                "width": width,
+                "height": height,
             }, "smart_mask_crop_info"
         if region_context.get("crop_canvas_w", 0) > 0 and region_context.get("crop_canvas_h", 0) > 0:
+            width, height = _normalize_gpt_image_size(
+                region_context["crop_canvas_w"],
+                region_context["crop_canvas_h"],
+            )
             return {
-                "width": int(region_context["crop_canvas_w"]),
-                "height": int(region_context["crop_canvas_h"]),
+                "width": width,
+                "height": height,
             }, "smart_mask_crop_canvas"
         if region_context.get("recommended_edit_size"):
             return region_context["recommended_edit_size"], "region_info"

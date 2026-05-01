@@ -165,15 +165,18 @@ NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -
 
 Recommended default:
 
-- Use `control_mode = auto_legacy` when you want the original automatic GPT Image behavior.
-- Use `control_mode = custom` when you want the size controls below to take effect.
-- Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
-- Leave `high_quality_max_size = True` if you expect `quality = high` to also request a larger image.
+- Use `control_mode = auto_legacy` only when you want the original automatic GPT Image behavior.
+- Use `control_mode = custom` for the Smart Mask Crop workflow.
+- Use `size_mode = auto_from_region` when `Smart Mask Crop -> info` is connected to `region_info`.
+- Set `high_quality_max_size = False` in the Smart Mask Crop workflow, because the crop node already controls the exact edit size.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
 - Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
-- Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
 
 For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, set GPT `size_mode = auto_from_region`, and set `high_quality_max_size = False`. This makes GPT request the same edit size that Smart Mask Stitch expects.
+
+When using a mask, `mask_image` must have the exact same pixel size as `image_1`. In the local crop workflow, connect `Smart Mask Crop -> cropped_image` to GPT `image_1` and `Smart Mask Crop -> cropped_mask_image` to GPT `mask_image`; do not connect the original Florence mask directly into GPT after cropping.
+
+Prompting for masked local edits should be conservative: describe only the object to retouch, name the reference image for that object, and explicitly preserve all pixels outside the mask. Avoid instructions that ask GPT Image to recompose the full portrait, change lighting globally, or rebuild the background; those belong before the crop, not inside the local masked edit.
 
 ---
 
@@ -261,6 +264,8 @@ Local masked-edit crop for models that accept a real mask (e.g. GPT Image). Use 
 Outputs: `stitcher`, `cropped_image`, `cropped_mask`, `cropped_mask_image`, `preview_image`, `info`
 
 > Wire `cropped_mask_image` directly into `GPT Image 2 Edit → mask_image`.
+
+The `info` output is valid JSON and includes the final `target_width` and `target_height` after any `edit_size_scale_percent` adjustment and FAL size clamping. GPT Image Edit can read this through `auto_from_region` so the requested output size stays aligned with the crop.
 
 Typical flow:
 ```
