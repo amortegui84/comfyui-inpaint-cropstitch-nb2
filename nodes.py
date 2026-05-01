@@ -156,6 +156,16 @@ def _summarize_remote_error(error):
     return text
 
 
+def _is_downstream_service_error(error):
+    text = str(error).lower()
+    return (
+        "downstream_service_error" in text
+        or "downstream service error" in text
+        or "downstream_service_unavailable" in text
+        or "downstream service unavailable" in text
+    )
+
+
 def _safe_json_loads(value):
     if isinstance(value, dict):
         return value
@@ -3579,7 +3589,50 @@ class NB2OpenAIImageEdit:
             if output_format in ("jpeg", "webp"):
                 arguments["output_compression"] = int(output_compression)
 
-            result = self._call_fal(model, arguments, fal_api_key)
+            result = None
+            arguments_sent = arguments
+            fallback_used = ""
+            fallback_errors = []
+            try:
+                result = self._call_fal(model, arguments, fal_api_key)
+            except Exception as first_error:
+                if not _is_downstream_service_error(first_error):
+                    raise
+
+                fallback_errors.append(_summarize_remote_error(first_error))
+                fallback_attempts = []
+                if image_size_sent != "auto":
+                    auto_args = dict(arguments)
+                    auto_args["image_size"] = "auto"
+                    fallback_attempts.append(("auto_image_size", auto_args))
+                if quality == "high":
+                    medium_args = dict(arguments)
+                    medium_args["quality"] = "medium"
+                    if image_size_sent != "auto":
+                        medium_args["image_size"] = "auto"
+                    fallback_attempts.append(("medium_quality_auto_size", medium_args))
+
+                for fallback_label, fallback_args in fallback_attempts:
+                    try:
+                        logger.warning(
+                            "GPT Image downstream error; retrying with fallback %s.",
+                            fallback_label,
+                        )
+                        result = self._call_fal(model, fallback_args, fal_api_key)
+                        arguments_sent = fallback_args
+                        fallback_used = fallback_label
+                        break
+                    except Exception as fallback_error:
+                        fallback_errors.append(_summarize_remote_error(fallback_error))
+                        if not _is_downstream_service_error(fallback_error):
+                            raise
+
+                if result is None:
+                    raise RuntimeError(
+                        "GPT Image downstream service failed after fallback attempts: "
+                        + " | ".join(fallback_errors)
+                    ) from first_error
+
             image_url = self._extract_result_image_url(result)
             if not image_url:
                 raise RuntimeError("FAL GPT Image edit returned no output image URL.")
@@ -3598,6 +3651,9 @@ class NB2OpenAIImageEdit:
                 "high_quality_max_size": bool(high_quality_max_size),
                 "resolved_size": resolved_size,
                 "image_size_sent": image_size_sent,
+                "actual_image_size_sent": arguments_sent.get("image_size"),
+                "actual_quality_sent": arguments_sent.get("quality", "auto"),
+                "fallback_used": fallback_used,
                 "size_source": size_source,
                 "input_width": int(image_size[0]),
                 "input_height": int(image_size[1]),
