@@ -140,7 +140,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
 | control_mode | choice | `auto_legacy` keeps original automatic sizing; `custom` enables size overrides |
-| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `max_for_aspect_ratio`, `preset`, `custom`, `auto_from_region`, or `manual` |
+| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `max_for_aspect_ratio`, `aspect_ratio`, `preset`, `custom`, `auto_from_region`, or `manual` |
 | size | choice | FAL presets such as `portrait_16_9`, `landscape_16_9`, plus legacy explicit sizes |
 | background | choice | `auto`, `opaque`, `transparent` |
 | output_format | choice | `png`, `webp`, `jpeg` |
@@ -156,6 +156,9 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
 | custom_width / custom_height | INT | Used when `size_mode = custom`; rounded to FAL's 16-pixel grid and 4K limits |
 | aspect_ratio | choice | Used when `size_mode = max_for_aspect_ratio`; chooses the largest valid GPT Image size for ratios such as `4:5`, `16:9`, or `1:1` |
+| resolution | choice | Used when `size_mode = aspect_ratio`; requests a 1K, 2K, or 4K long edge, then clamps to GPT Image limits |
+| num_images | INT | Number of outputs to request |
+| sync_mode | BOOLEAN | Passed through to FAL |
 
 Outputs: `images`, `info`
 
@@ -172,6 +175,7 @@ Recommended default:
 - Set `high_quality_max_size = False` in the Smart Mask Crop workflow, because the crop node already controls the exact edit size.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
 - Use `max_for_aspect_ratio` plus `aspect_ratio` when you want the largest valid GPT Image size for a specific shape, for example `4:5`.
+- Use `aspect_ratio` plus `resolution = 4K` when you want the simpler fal-flux-nodes-style sizing control.
 - Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
 
 For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, set GPT `size_mode = auto_from_region`, and set `high_quality_max_size = False`. This makes GPT request the same edit size that Smart Mask Stitch expects.

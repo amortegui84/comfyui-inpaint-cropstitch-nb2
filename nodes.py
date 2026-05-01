@@ -3206,6 +3206,7 @@ class NB2OpenAIImageEdit:
         "auto_from_input",
         "max_from_input_aspect",
         "max_for_aspect_ratio",
+        "aspect_ratio",
         "preset",
         "custom",
         "auto_from_region",
@@ -3292,6 +3293,12 @@ class NB2OpenAIImageEdit:
                     "default": "auto",
                     "tooltip": "Used when size_mode = max_for_aspect_ratio.",
                 }),
+                "resolution": (["1K", "2K", "4K"], {
+                    "default": "4K",
+                    "tooltip": "Used when size_mode = aspect_ratio. Long edge request, clamped to GPT Image limits.",
+                }),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 4}),
+                "sync_mode": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -3395,6 +3402,22 @@ class NB2OpenAIImageEdit:
         mask_rgba.save(buf, format="PNG")
         return buf.getvalue()
 
+    def _calculate_image_size_from_aspect_ratio(self, aspect_ratio, resolution):
+        long_edge_map = {
+            "1K": 1024,
+            "2K": 2048,
+            "4K": 4096,
+        }
+        long_edge = long_edge_map.get(resolution, 1024)
+        ratio = _aspect_ratio_to_float(aspect_ratio) or (16.0 / 9.0)
+        if ratio >= 1.0:
+            width = long_edge
+            height = long_edge / ratio
+        else:
+            height = long_edge
+            width = long_edge * ratio
+        return self._normalize_custom_size(width, height)
+
     def _mask_bbox(self, mask_image):
         mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
         if mask_np.shape[-1] >= 3:
@@ -3426,7 +3449,8 @@ class NB2OpenAIImageEdit:
         return {"width": width, "height": height}
 
     def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None,
-                      custom_width=3840, custom_height=2160, aspect_ratio="auto"):
+                      custom_width=3840, custom_height=2160, aspect_ratio="auto",
+                      resolution="4K"):
         if size_mode == "auto_from_input":
             return "auto", "input_image"
         if size_mode == "max_from_input_aspect":
@@ -3441,6 +3465,12 @@ class NB2OpenAIImageEdit:
             )
             width, height = _max_gpt_size_for_aspect_ratio(aspect_value)
             return {"width": width, "height": height}, f"max_for_aspect_ratio:{aspect_source}"
+        if size_mode == "aspect_ratio":
+            aspect = aspect_ratio
+            if aspect == "auto" and input_size:
+                input_w, input_h = input_size
+                aspect = f"{int(input_w)}:{int(input_h)}"
+            return self._calculate_image_size_from_aspect_ratio(aspect, resolution), f"aspect_ratio:{aspect}:{resolution}"
         if size_mode == "custom":
             return self._normalize_custom_size(custom_width, custom_height), "custom"
         if size_mode == "preset":
@@ -3647,6 +3677,9 @@ class NB2OpenAIImageEdit:
         image_8=None,
         region_info="",
         aspect_ratio="auto",
+        resolution="4K",
+        num_images=1,
+        sync_mode=False,
     ):
         try:
             fal_api_key, fal_api_key_source = self._resolve_api_key(
@@ -3704,6 +3737,7 @@ class NB2OpenAIImageEdit:
                 custom_width=custom_width,
                 custom_height=custom_height,
                 aspect_ratio=aspect_ratio,
+                resolution=resolution,
             )
 
             mask_url = None
@@ -3724,10 +3758,12 @@ class NB2OpenAIImageEdit:
             }
             if quality != "auto":
                 arguments["quality"] = quality
+            arguments["num_images"] = int(num_images)
             if mask_url:
-                arguments["mask_url"] = mask_url
+                arguments["mask_image_url"] = mask_url
             if output_format in ("jpeg", "webp"):
                 arguments["output_compression"] = int(output_compression)
+            arguments["sync_mode"] = bool(sync_mode)
 
             result = None
             arguments_sent = arguments
@@ -3800,6 +3836,9 @@ class NB2OpenAIImageEdit:
                 "fallback_used": fallback_used,
                 "size_source": size_source,
                 "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+                "num_images": int(num_images),
+                "sync_mode": bool(sync_mode),
                 "input_width": int(image_size[0]),
                 "input_height": int(image_size[1]),
                 "output_width": output_width,
