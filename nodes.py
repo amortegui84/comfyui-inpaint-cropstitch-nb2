@@ -133,7 +133,26 @@ EDIT_SIZE_BY_ASPECT_RATIO = {
     "16:9": "2752x1536",
     "9:16": "1536x2752",
     "1:1": "2048x2048",
+    "4:5": "2048x2560",
+    "5:4": "2560x2048",
+    "3:2": "2496x1664",
+    "2:3": "1664x2496",
+    "4:3": "2304x1728",
+    "3:4": "1728x2304",
 }
+
+ASPECT_RATIO_OPTIONS = [
+    "auto",
+    "1:1",
+    "16:9",
+    "9:16",
+    "4:5",
+    "5:4",
+    "3:2",
+    "2:3",
+    "4:3",
+    "3:4",
+]
 
 
 def _coerce_text_value(value):
@@ -205,6 +224,36 @@ def _recommend_edit_size_for_aspect_ratio(aspect_ratio):
     return EDIT_SIZE_BY_ASPECT_RATIO.get(aspect_ratio, "1024x1024")
 
 
+def _aspect_ratio_to_float(aspect_ratio):
+    value = _coerce_text_value(aspect_ratio)
+    match = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", value)
+    if match:
+        w = max(1.0, float(match.group(1)))
+        h = max(1.0, float(match.group(2)))
+        return w / h
+    return None
+
+
+def _max_gpt_size_for_aspect_ratio(aspect_ratio):
+    ratio = float(aspect_ratio)
+    ratio = max(1.0 / 3.0, min(3.0, ratio))
+    max_edge = 3840
+    max_pixels = 8_294_400
+    if ratio >= 1.0:
+        width = min(max_edge, math.sqrt(max_pixels * ratio))
+        height = width / ratio
+        if height > max_edge:
+            height = max_edge
+            width = height * ratio
+    else:
+        height = min(max_edge, math.sqrt(max_pixels / ratio))
+        width = height * ratio
+        if width > max_edge:
+            width = max_edge
+            height = width / ratio
+    return _normalize_gpt_image_size(width, height)
+
+
 def _normalize_gpt_image_size(width, height):
     width = max(512, min(3840, int(width)))
     height = max(512, min(3840, int(height)))
@@ -246,6 +295,43 @@ def _get_region_edit_hints(region_type):
         "mask_feather_percent": 5.0,
         "context_expand": 1.10,
     }
+
+
+def _resolve_aspect_ratio_value(aspect_ratio_mode, region_context=None,
+                                image_size=None, bbox=None, fallback_size=None):
+    aspect_ratio_mode = _coerce_text_value(aspect_ratio_mode) or "auto"
+    region_context = region_context or {}
+
+    if aspect_ratio_mode in ("auto", "region_info"):
+        recommended = region_context.get("recommended_aspect_ratio")
+        ratio = _aspect_ratio_to_float(recommended)
+        if ratio:
+            return ratio, recommended or "region_info"
+        recommended = _recommend_aspect_ratio_for_region(
+            region_context.get("region_type"),
+            region_context.get("bbox"),
+        )
+        ratio = _aspect_ratio_to_float(recommended)
+        if ratio:
+            return ratio, recommended
+
+    if aspect_ratio_mode == "mask_bbox" and bbox:
+        x1, y1, x2, y2 = bbox
+        return max(1.0, x2 - x1) / max(1.0, y2 - y1), "mask_bbox"
+
+    if aspect_ratio_mode == "input_image" and image_size:
+        image_w, image_h = image_size
+        return max(1.0, image_w) / max(1.0, image_h), "input_image"
+
+    ratio = _aspect_ratio_to_float(aspect_ratio_mode)
+    if ratio:
+        return ratio, aspect_ratio_mode
+
+    if fallback_size:
+        fallback_w, fallback_h = fallback_size
+        return max(1.0, fallback_w) / max(1.0, fallback_h), "fallback_size"
+
+    return 1.0, "default"
 
 
 def _extract_region_context(region_info):
@@ -1601,6 +1687,18 @@ class SmartMaskCrop:
             },
             "optional": {
                 "region_info": ("STRING",),
+                "target_size_mode": (["region_recommended", "manual_width_height", "max_for_aspect_ratio"], {
+                    "default": "region_recommended",
+                    "tooltip": (
+                        "region_recommended uses Florence/region defaults; manual_width_height "
+                        "uses target_width/target_height; max_for_aspect_ratio uses the largest "
+                        "valid GPT Image size for target_aspect_ratio."
+                    ),
+                }),
+                "target_aspect_ratio": (["region_info", "mask_bbox", "input_image"] + ASPECT_RATIO_OPTIONS[1:], {
+                    "default": "region_info",
+                    "tooltip": "Aspect ratio used when target_size_mode is max_for_aspect_ratio.",
+                }),
             }
         }
 
@@ -1618,7 +1716,9 @@ class SmartMaskCrop:
                         target_width, target_height, downscale_algorithm,
                         upscale_algorithm, device_mode, depad_florence=True,
                         region_info="", use_region_mask_defaults=True,
-                        edit_size_scale_percent=100.0):
+                        edit_size_scale_percent=100.0,
+                        target_size_mode="region_recommended",
+                        target_aspect_ratio="region_info"):
         image = image.clone()
         mask = mask.clone()
         if device_mode == "gpu (much faster)":
@@ -1635,33 +1735,22 @@ class SmartMaskCrop:
         )
         region_context = _extract_region_context(region_info)
         context_expand_effective = float(context_expand)
-        target_width_effective = int(target_width)
-        target_height_effective = int(target_height)
+        base_target_width = int(target_width)
+        base_target_height = int(target_height)
         mask_expand_effective = float(mask_expand_percent)
         mask_feather_effective = float(mask_feather_percent)
 
         if use_region_guidance:
             if region_context.get("recommended_context_expand", 0.0) > 0.0:
                 context_expand_effective = max(context_expand_effective, float(region_context["recommended_context_expand"]))
-            if resize_mode == "resize_to_target" and region_context.get("recommended_edit_size"):
-                target_width_effective, target_height_effective = _parse_edit_size(region_context["recommended_edit_size"])
+            if target_size_mode == "region_recommended" and region_context.get("recommended_edit_size"):
+                base_target_width, base_target_height = _parse_edit_size(region_context["recommended_edit_size"])
             if (use_region_mask_defaults and mask_expand_effective <= 0.0
                     and region_context.get("recommended_mask_expand_percent", 0.0) > 0.0):
                 mask_expand_effective = float(region_context["recommended_mask_expand_percent"])
             if (use_region_mask_defaults and mask_feather_effective <= 0.0
                     and region_context.get("recommended_mask_feather_percent", 0.0) > 0.0):
                 mask_feather_effective = float(region_context["recommended_mask_feather_percent"])
-
-        scale = float(edit_size_scale_percent) / 100.0
-        if abs(scale - 1.0) > 0.005:
-            raw_w = max(64, int(round(target_width_effective * scale / 16.0)) * 16)
-            raw_h = max(64, int(round(target_height_effective * scale / 16.0)) * 16)
-            target_width_effective, target_height_effective = _normalize_gpt_image_size(raw_w, raw_h)
-        else:
-            target_width_effective, target_height_effective = _normalize_gpt_image_size(
-                target_width_effective,
-                target_height_effective,
-            )
 
         result_stitcher = {
             'downscale_algorithm': downscale_algorithm,
@@ -1705,6 +1794,31 @@ class SmartMaskCrop:
             cur_y = by[0].item()
             cur_w = bw[0].item()
             cur_h = bh[0].item()
+
+            target_aspect_source = "manual_width_height"
+            if target_size_mode == "max_for_aspect_ratio":
+                aspect_ratio_value, target_aspect_source = _resolve_aspect_ratio_value(
+                    target_aspect_ratio,
+                    region_context=region_context,
+                    image_size=(image_w, image_h),
+                    bbox=(cur_x, cur_y, cur_x + cur_w, cur_y + cur_h),
+                    fallback_size=(base_target_width, base_target_height),
+                )
+                target_width_effective, target_height_effective = _max_gpt_size_for_aspect_ratio(aspect_ratio_value)
+            else:
+                target_width_effective = int(base_target_width)
+                target_height_effective = int(base_target_height)
+
+            scale = float(edit_size_scale_percent) / 100.0
+            if abs(scale - 1.0) > 0.005:
+                raw_w = max(64, int(round(target_width_effective * scale / 16.0)) * 16)
+                raw_h = max(64, int(round(target_height_effective * scale / 16.0)) * 16)
+                target_width_effective, target_height_effective = _normalize_gpt_image_size(raw_w, raw_h)
+            else:
+                target_width_effective, target_height_effective = _normalize_gpt_image_size(
+                    target_width_effective,
+                    target_height_effective,
+                )
 
             target_ar = target_width_effective / max(1, target_height_effective)
             rect_x, rect_y, rect_w, rect_h = _fit_aspect_rect_to_bbox(
@@ -1779,6 +1893,10 @@ class SmartMaskCrop:
                 "context_expand": context_expand_effective,
                 "use_region_guidance": bool(use_region_guidance),
                 "resize_mode": resize_mode,
+                "target_size_mode": target_size_mode,
+                "target_aspect_ratio": target_aspect_ratio,
+                "target_aspect_source": target_aspect_source,
+                "target_aspect_value": float(target_ar),
                 "original_crop_width": int(rect_w),
                 "original_crop_height": int(rect_h),
                 "target_width": int(out_w),
@@ -3084,7 +3202,15 @@ class NB2OpenAIImageEdit:
     MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
     QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
     CONTROL_MODE_OPTIONS = ["auto_legacy", "custom"]
-    SIZE_MODE_OPTIONS = ["auto_from_input", "max_from_input_aspect", "preset", "custom", "auto_from_region", "manual"]
+    SIZE_MODE_OPTIONS = [
+        "auto_from_input",
+        "max_from_input_aspect",
+        "max_for_aspect_ratio",
+        "preset",
+        "custom",
+        "auto_from_region",
+        "manual",
+    ]
     SIZE_OPTIONS = [
         "auto",
         "square_hd",
@@ -3162,6 +3288,10 @@ class NB2OpenAIImageEdit:
                 "image_8": ("IMAGE",),
                 "custom_width": ("INT", {"default": 3840, "min": 512, "max": 3840, "step": 16}),
                 "custom_height": ("INT", {"default": 2160, "min": 512, "max": 3840, "step": 16}),
+                "aspect_ratio": (ASPECT_RATIO_OPTIONS, {
+                    "default": "auto",
+                    "tooltip": "Used when size_mode = max_for_aspect_ratio.",
+                }),
             },
         }
 
@@ -3296,13 +3426,21 @@ class NB2OpenAIImageEdit:
         return {"width": width, "height": height}
 
     def _resolve_size(self, size_mode, size, region_info, mask_image, input_size=None,
-                      custom_width=3840, custom_height=2160):
+                      custom_width=3840, custom_height=2160, aspect_ratio="auto"):
         if size_mode == "auto_from_input":
             return "auto", "input_image"
         if size_mode == "max_from_input_aspect":
             if not input_size:
                 return size, "manual_fallback"
             return self._max_size_from_input_aspect(input_size), "max_from_input_aspect"
+        if size_mode == "max_for_aspect_ratio":
+            aspect_value, aspect_source = _resolve_aspect_ratio_value(
+                aspect_ratio,
+                image_size=input_size,
+                fallback_size=(custom_width, custom_height),
+            )
+            width, height = _max_gpt_size_for_aspect_ratio(aspect_value)
+            return {"width": width, "height": height}, f"max_for_aspect_ratio:{aspect_source}"
         if size_mode == "custom":
             return self._normalize_custom_size(custom_width, custom_height), "custom"
         if size_mode == "preset":
@@ -3508,6 +3646,7 @@ class NB2OpenAIImageEdit:
         image_7=None,
         image_8=None,
         region_info="",
+        aspect_ratio="auto",
     ):
         try:
             fal_api_key, fal_api_key_source = self._resolve_api_key(
@@ -3564,6 +3703,7 @@ class NB2OpenAIImageEdit:
                 input_size=image_size,
                 custom_width=custom_width,
                 custom_height=custom_height,
+                aspect_ratio=aspect_ratio,
             )
 
             mask_url = None
@@ -3655,6 +3795,7 @@ class NB2OpenAIImageEdit:
                 "actual_quality_sent": arguments_sent.get("quality", "auto"),
                 "fallback_used": fallback_used,
                 "size_source": size_source,
+                "aspect_ratio": aspect_ratio,
                 "input_width": int(image_size[0]),
                 "input_height": int(image_size[1]),
                 "output_width": output_width,

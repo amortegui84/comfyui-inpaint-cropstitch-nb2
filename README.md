@@ -140,7 +140,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
 | control_mode | choice | `auto_legacy` keeps original automatic sizing; `custom` enables size overrides |
-| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `preset`, `custom`, `auto_from_region`, or `manual` |
+| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `max_for_aspect_ratio`, `preset`, `custom`, `auto_from_region`, or `manual` |
 | size | choice | FAL presets such as `portrait_16_9`, `landscape_16_9`, plus legacy explicit sizes |
 | background | choice | `auto`, `opaque`, `transparent` |
 | output_format | choice | `png`, `webp`, `jpeg` |
@@ -155,6 +155,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | image_2 ... image_8 | IMAGE | Optional reference images sent together with `image_1` |
 | region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
 | custom_width / custom_height | INT | Used when `size_mode = custom`; rounded to FAL's 16-pixel grid and 4K limits |
+| aspect_ratio | choice | Used when `size_mode = max_for_aspect_ratio`; chooses the largest valid GPT Image size for ratios such as `4:5`, `16:9`, or `1:1` |
 
 Outputs: `images`, `info`
 
@@ -170,6 +171,7 @@ Recommended default:
 - Use `size_mode = auto_from_region` when `Smart Mask Crop -> info` is connected to `region_info`.
 - Set `high_quality_max_size = False` in the Smart Mask Crop workflow, because the crop node already controls the exact edit size.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
+- Use `max_for_aspect_ratio` plus `aspect_ratio` when you want the largest valid GPT Image size for a specific shape, for example `4:5`.
 - Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
 
 For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, set GPT `size_mode = auto_from_region`, and set `high_quality_max_size = False`. This makes GPT request the same edit size that Smart Mask Stitch expects.
@@ -260,12 +262,16 @@ Local masked-edit crop for models that accept a real mask (e.g. GPT Image). Use 
 | depad_florence | BOOLEAN | Remove Florence2 letterbox padding (default `True`) |
 | use_region_mask_defaults | BOOLEAN | When enabled, `0` expand/feather uses Florence defaults; disable it to keep a hard mask |
 | region_info | STRING | Optional Florence `info` output for shared aspect, mask, and sizing hints |
+| target_size_mode | choice | `region_recommended`, `manual_width_height`, or `max_for_aspect_ratio` |
+| target_aspect_ratio | choice | Used with `max_for_aspect_ratio`; can follow `region_info`, `mask_bbox`, `input_image`, or a fixed ratio such as `4:5` |
 
 Outputs: `stitcher`, `cropped_image`, `cropped_mask`, `cropped_mask_image`, `preview_image`, `info`
 
 > Wire `cropped_mask_image` directly into `GPT Image 2 Edit → mask_image`.
 
-The `info` output is valid JSON and includes the final `target_width` and `target_height` after any `edit_size_scale_percent` adjustment and FAL size clamping. GPT Image Edit can read this through `auto_from_region` so the requested output size stays aligned with the crop.
+The `info` output is valid JSON and includes the final `target_width` and `target_height` after any `target_size_mode`, `target_aspect_ratio`, `edit_size_scale_percent`, and FAL size clamping. GPT Image Edit can read this through `auto_from_region` so the requested output size stays aligned with the crop and mask.
+
+Use `target_size_mode = max_for_aspect_ratio` when the workflow should be driven by shape instead of manual dimensions. For example, `target_aspect_ratio = 4:5` picks the largest valid GPT Image 4:5 size, then crops both image and mask to that same aspect before sending them to GPT.
 
 Typical flow:
 ```
