@@ -139,6 +139,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | prompt | STRING | Edit instruction |
 | model | choice | `openai/gpt-image-2/edit` |
 | quality | choice | `auto`, `low`, `medium`, `high` |
+| control_mode | choice | `auto_legacy` keeps original automatic sizing; `custom` enables size overrides |
 | size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `preset`, `custom`, `auto_from_region`, or `manual` |
 | size | choice | FAL presets such as `portrait_16_9`, `landscape_16_9`, plus legacy explicit sizes |
 | background | choice | `auto`, `opaque`, `transparent` |
@@ -164,6 +165,8 @@ NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -
 
 Recommended default:
 
+- Use `control_mode = auto_legacy` when you want the original automatic GPT Image behavior.
+- Use `control_mode = custom` when you want the size controls below to take effect.
 - Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
 - Leave `high_quality_max_size = True` if you expect `quality = high` to also request a larger image.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.

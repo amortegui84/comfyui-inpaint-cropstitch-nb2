@@ -3022,6 +3022,7 @@ class NB2OpenAIImageEdit:
 
     MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
     QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
+    CONTROL_MODE_OPTIONS = ["auto_legacy", "custom"]
     SIZE_MODE_OPTIONS = ["auto_from_input", "max_from_input_aspect", "preset", "custom", "auto_from_region", "manual"]
     SIZE_OPTIONS = [
         "auto",
@@ -3053,6 +3054,10 @@ class NB2OpenAIImageEdit:
                 }),
                 "model": (cls.MODEL_OPTIONS, {"default": "openai/gpt-image-2/edit"}),
                 "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
+                "control_mode": (cls.CONTROL_MODE_OPTIONS, {
+                    "default": "auto_legacy",
+                    "tooltip": "auto_legacy keeps the original automatic sizing behavior; custom enables size overrides.",
+                }),
                 "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_input"}),
                 "size": (cls.SIZE_OPTIONS, {"default": "auto"}),
                 "background": (cls.BACKGROUND_OPTIONS, {"default": "auto"}),
@@ -3424,6 +3429,7 @@ class NB2OpenAIImageEdit:
         prompt,
         model,
         quality,
+        control_mode,
         size_mode,
         size,
         background,
@@ -3486,8 +3492,12 @@ class NB2OpenAIImageEdit:
                 raise ValueError("image_1 is required.")
 
             requested_size_mode = size_mode
-            effective_size_mode = size_mode
-            if high_quality_max_size and quality == "high" and size_mode == "auto_from_input":
+            customization_enabled = control_mode == "custom"
+            if customization_enabled:
+                effective_size_mode = size_mode
+            else:
+                effective_size_mode = "auto_from_input"
+            if customization_enabled and high_quality_max_size and quality == "high" and size_mode == "auto_from_input":
                 effective_size_mode = "max_from_input_aspect"
 
             resolved_size, size_source = self._resolve_size(
@@ -3534,6 +3544,8 @@ class NB2OpenAIImageEdit:
             info = {
                 "model": model,
                 "quality": quality,
+                "control_mode": control_mode,
+                "customization_enabled": bool(customization_enabled),
                 "prompt_sent": prompt_sent,
                 "size_mode": requested_size_mode,
                 "effective_size_mode": effective_size_mode,
