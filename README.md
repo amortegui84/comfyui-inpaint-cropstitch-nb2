@@ -164,7 +164,8 @@ Recommended default:
 
 - Use `size_mode = preset` and `image_size = auto` for the simplest inpainting behavior.
 - Use `size_mode = auto_from_region` only when `Smart Mask Crop -> info` is connected to `region_info` and the GPT output must match the crop size exactly.
-- Use `size_mode = aspect_ratio` plus `resolution = 4K` for final full-frame output sizing.
+- Use `size_mode = aspect_ratio`, `aspect_ratio = 4:5`, and `resolution = 4K` for final portrait variation sizing. In this mode, `width` and `height` are ignored; those fields only apply when `size_mode = custom`.
+- `4K` means the largest valid GPT edit size for the selected aspect ratio, not always a 3840-pixel wide image. For `4:5`, the request is vertical and should resolve near `2576x3216`.
 
 For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, and set GPT `size_mode = auto_from_region`. This makes GPT request the same edit size that Smart Mask Stitch expects.
 

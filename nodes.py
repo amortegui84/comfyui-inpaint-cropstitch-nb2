@@ -3374,13 +3374,24 @@ class NB2OpenAIImageEdit:
         }
         long_edge = long_edge_map.get(resolution, 1024)
         ratio = _aspect_ratio_to_float(aspect_ratio) or (16.0 / 9.0)
+
+        if resolution == "4K":
+            width, height = _max_gpt_size_for_aspect_ratio(ratio)
+            return {
+                "width": width,
+                "height": height,
+            }
+
         if ratio >= 1.0:
             width = long_edge
             height = long_edge / ratio
         else:
             height = long_edge
             width = long_edge * ratio
-        return self._normalize_custom_size(width, height)
+
+        width = max(16, int(math.floor(width / 16.0) * 16))
+        height = max(16, int(math.floor(height / 16.0) * 16))
+        return {"width": int(width), "height": int(height)}
 
     def _mask_bbox(self, mask_image):
         mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
