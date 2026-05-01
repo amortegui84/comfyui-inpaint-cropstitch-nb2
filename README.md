@@ -273,6 +273,8 @@ The `info` output is valid JSON and includes the final `target_width` and `targe
 
 Use `target_size_mode = max_for_aspect_ratio` when the workflow should be driven by shape instead of manual dimensions. For example, `target_aspect_ratio = 4:5` picks the largest valid GPT Image 4:5 size, then crops both image and mask to that same aspect before sending them to GPT.
 
+For portrait try-on workflows where the source portrait is already the desired shape, use `target_size_mode = max_for_aspect_ratio` with `target_aspect_ratio = input_image`. This prevents the `glasses` region hint from forcing a horizontal 16:9 crop when the full workflow is meant to stay 4:5.
+
 Typical flow:
 ```
 NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> Smart Mask Crop -> GPT Image 2 Edit -> Smart Mask Stitch

@@ -3741,11 +3741,15 @@ class NB2OpenAIImageEdit:
 
                 fallback_errors.append(_summarize_remote_error(first_error))
                 fallback_attempts = []
+                if quality == "high":
+                    medium_args = dict(arguments)
+                    medium_args["quality"] = "medium"
+                    fallback_attempts.append(("medium_quality_same_size", medium_args))
                 if image_size_sent != "auto":
                     auto_args = dict(arguments)
                     auto_args["image_size"] = "auto"
                     fallback_attempts.append(("auto_image_size", auto_args))
-                if quality == "high":
+                if quality == "high" and image_size_sent != "auto":
                     medium_args = dict(arguments)
                     medium_args["quality"] = "medium"
                     if image_size_sent != "auto":
