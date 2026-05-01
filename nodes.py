@@ -239,6 +239,10 @@ def _extract_region_context(region_info):
         "bbox": bbox,
         "recommended_aspect_ratio": recommended_aspect_ratio,
         "recommended_edit_size": recommended_edit_size,
+        "target_width": int(data.get("target_width", 0) or 0) if isinstance(data, dict) else 0,
+        "target_height": int(data.get("target_height", 0) or 0) if isinstance(data, dict) else 0,
+        "crop_canvas_w": int(data.get("crop_canvas_w", 0) or 0) if isinstance(data, dict) else 0,
+        "crop_canvas_h": int(data.get("crop_canvas_h", 0) or 0) if isinstance(data, dict) else 0,
         "recommended_mask_expand_percent": float(data.get("recommended_mask_expand_percent", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
         "recommended_mask_feather_percent": float(data.get("recommended_mask_feather_percent", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
         "recommended_context_expand": float(data.get("recommended_context_expand", 0.0) or 0.0) if isinstance(data, dict) else 0.0,
@@ -1696,6 +1700,10 @@ class SmartMaskCrop:
                 mask_feather_effective,
             ).unsqueeze(0)
             result_stitcher['cropped_mask_for_blend'].append(edit_mask.cpu())
+            result_stitcher.setdefault('expected_edit_width', []).append(int(out_w))
+            result_stitcher.setdefault('expected_edit_height', []).append(int(out_h))
+            result_stitcher.setdefault('original_edit_width', []).append(int(ctc_w))
+            result_stitcher.setdefault('original_edit_height', []).append(int(ctc_h))
 
             result_image.append(cropped_image.squeeze(0).cpu())
             result_mask.append(edit_mask.squeeze(0).cpu())
@@ -1715,6 +1723,10 @@ class SmartMaskCrop:
                 "original_crop_height": int(rect_h),
                 "target_width": int(out_w),
                 "target_height": int(out_h),
+                "recommended_gpt_size_mode": "auto_from_region",
+                "recommended_gpt_high_quality_max_size": False,
+                "recommended_stitch_edge_feather_percent": 3.0,
+                "recommended_stitch_result_mask_feather_percent": max(0.0, min(8.0, float(mask_feather_effective))),
                 "mask_expand_percent": float(mask_expand_effective),
                 "mask_feather_percent": float(mask_feather_effective),
                 "use_region_mask_defaults": bool(use_region_mask_defaults),
@@ -1816,6 +1828,12 @@ class SmartMaskStitch:
             cto_w = stitcher['canvas_to_orig_w'][idx]
             cto_h = stitcher['canvas_to_orig_h'][idx]
             canvas = canvas_images[idx].clone()
+            expected_widths = stitcher.get('expected_edit_width') or []
+            expected_heights = stitcher.get('expected_edit_height') or []
+            expected_w = int(expected_widths[idx]) if idx < len(expected_widths) else int(ctc_w)
+            expected_h = int(expected_heights[idx]) if idx < len(expected_heights) else int(ctc_h)
+            input_h = int(one_image.shape[1])
+            input_w = int(one_image.shape[2])
 
             out = self._stitch_single(
                 canvas, one_image, one_mask,
@@ -1825,6 +1843,17 @@ class SmartMaskStitch:
                 result_mask_feather_percent, device, processor
             )
             results.append(out.squeeze(0))
+            aspect_delta = abs((input_w / max(1, input_h)) - (ctc_w / max(1, ctc_h)))
+            if input_w != expected_w or input_h != expected_h or aspect_delta > 0.01:
+                logger.warning(
+                    "Smart Mask Stitch resized edited image %sx%s into paste area %sx%s; expected editor size was %sx%s.",
+                    input_w,
+                    input_h,
+                    int(ctc_w),
+                    int(ctc_h),
+                    expected_w,
+                    expected_h,
+                )
 
         return (torch.stack(results, dim=0).cpu(),)
 
@@ -3229,6 +3258,16 @@ class NB2OpenAIImageEdit:
             return size, "manual"
 
         region_context = _extract_region_context(region_info)
+        if region_context.get("target_width", 0) > 0 and region_context.get("target_height", 0) > 0:
+            return {
+                "width": int(region_context["target_width"]),
+                "height": int(region_context["target_height"]),
+            }, "smart_mask_crop_info"
+        if region_context.get("crop_canvas_w", 0) > 0 and region_context.get("crop_canvas_h", 0) > 0:
+            return {
+                "width": int(region_context["crop_canvas_w"]),
+                "height": int(region_context["crop_canvas_h"]),
+            }, "smart_mask_crop_canvas"
         if region_context.get("recommended_edit_size"):
             return region_context["recommended_edit_size"], "region_info"
 

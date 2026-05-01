@@ -170,6 +170,8 @@ Recommended default:
 - Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
 - Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
 
+For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, set GPT `size_mode = auto_from_region`, and set `high_quality_max_size = False`. This makes GPT request the same edit size that Smart Mask Stitch expects.
+
 ---
 
 ### Nano Banana 2 Edit
