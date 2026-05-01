@@ -131,33 +131,26 @@ NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> NB2 Smart Region -
 
 ### OpenAI GPT Image Edit
 
-External GPT Image 2 editor integrated into this repo through FAL. It calls `openai/gpt-image-2/edit`, accepts an optional mask, and can either preserve the input crop with `auto` or use a documented preset size when you explicitly request it.
+External GPT Image 2 editor integrated into this repo through FAL. This node now follows the simpler payload shape used by `fal-flux-nodes`, while exposing FAL/OpenAI keys as node inputs instead of relying on a shared config file.
 
 | Input | Type | Description |
 |---|---|---|
 | image_1 | IMAGE | Base image to edit |
 | prompt | STRING | Edit instruction |
-| model | choice | `openai/gpt-image-2/edit` |
-| quality | choice | `auto`, `low`, `medium`, `high` |
-| control_mode | choice | `auto_legacy` keeps original automatic sizing; `custom` enables size overrides |
-| size_mode | choice | `auto_from_input`, `max_from_input_aspect`, `max_for_aspect_ratio`, `aspect_ratio`, `preset`, `custom`, `auto_from_region`, or `manual` |
-| size | choice | FAL presets such as `portrait_16_9`, `landscape_16_9`, plus legacy explicit sizes |
-| background | choice | `auto`, `opaque`, `transparent` |
-| output_format | choice | `png`, `webp`, `jpeg` |
-| output_compression | INT | Used for `webp` and `jpeg` outputs |
-| moderation | choice | `auto` or `low` |
-| high_quality_max_size | BOOLEAN | When `quality = high` and size is auto, request the largest valid size for the input aspect |
 | api_key | STRING | Optional direct FAL API key input |
 | api_key_env_var | STRING | FAL env var fallback, default `FAL_KEY` |
 | openai_api_key | STRING | Optional direct OpenAI API key input passed through to FAL |
 | openai_api_key_env_var | STRING | OpenAI env var fallback, default `OPENAI_API_KEY` |
-| mask_image | IMAGE | Optional mask image. If connected, the node converts it to an alpha mask automatically |
-| image_2 ... image_8 | IMAGE | Optional reference images sent together with `image_1` |
-| region_info | STRING | Optional Florence `info` output used only when `size_mode = auto_from_region` |
-| custom_width / custom_height | INT | Used when `size_mode = custom`; rounded to FAL's 16-pixel grid and 4K limits |
-| aspect_ratio | choice | Used when `size_mode = max_for_aspect_ratio`; chooses the largest valid GPT Image size for ratios such as `4:5`, `16:9`, or `1:1` |
-| resolution | choice | Used when `size_mode = aspect_ratio`; requests a 1K, 2K, or 4K long edge, then clamps to GPT Image limits |
+| image_2 ... image_6 | IMAGE | Optional reference images sent together with `image_1` |
+| mask_image | IMAGE | Optional mask image uploaded as `mask_image_url` |
+| region_info | STRING | Optional Smart Mask Crop `info`; used only when `size_mode = auto_from_region` |
+| size_mode | choice | `preset`, `aspect_ratio`, `custom`, or `auto_from_region` |
+| image_size | choice | Used when `size_mode = preset`; FAL presets such as `auto`, `portrait_16_9`, or `landscape_16_9` |
+| aspect_ratio / resolution | choice | Used when `size_mode = aspect_ratio`; simple fal-flux-nodes-style sizing |
+| width / height | INT | Used when `size_mode = custom`; must be multiples of 16 |
+| quality | choice | `low`, `medium`, `high` |
 | num_images | INT | Number of outputs to request |
+| output_format | choice | `png`, `webp`, `jpeg` |
 | sync_mode | BOOLEAN | Passed through to FAL |
 
 Outputs: `images`, `info`
@@ -169,16 +162,11 @@ NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -
 
 Recommended default:
 
-- Use `control_mode = auto_legacy` only when you want the original automatic GPT Image behavior.
-- Use `control_mode = custom` for the Smart Mask Crop workflow.
-- Use `size_mode = auto_from_region` when `Smart Mask Crop -> info` is connected to `region_info`.
-- Set `high_quality_max_size = False` in the Smart Mask Crop workflow, because the crop node already controls the exact edit size.
-- Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
-- Use `max_for_aspect_ratio` plus `aspect_ratio` when you want the largest valid GPT Image size for a specific shape, for example `4:5`.
-- Use `aspect_ratio` plus `resolution = 4K` when you want the simpler fal-flux-nodes-style sizing control.
-- Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
+- Use `size_mode = preset` and `image_size = auto` for the simplest inpainting behavior.
+- Use `size_mode = auto_from_region` only when `Smart Mask Crop -> info` is connected to `region_info` and the GPT output must match the crop size exactly.
+- Use `size_mode = aspect_ratio` plus `resolution = 4K` for final full-frame output sizing.
 
-For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, set GPT `size_mode = auto_from_region`, and set `high_quality_max_size = False`. This makes GPT request the same edit size that Smart Mask Stitch expects.
+For the most stable automatic masked flow, connect `Smart Mask Crop -> info` into `OpenAI GPT Image Edit -> region_info`, and set GPT `size_mode = auto_from_region`. This makes GPT request the same edit size that Smart Mask Stitch expects.
 
 When using a mask, `mask_image` must have the exact same pixel size as `image_1`. In the local crop workflow, connect `Smart Mask Crop -> cropped_image` to GPT `image_1` and `Smart Mask Crop -> cropped_mask_image` to GPT `mask_image`; do not connect the original Florence mask directly into GPT after cropping.
 

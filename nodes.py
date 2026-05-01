@@ -3200,19 +3200,9 @@ class NB2OpenAIImageEdit:
     """
 
     MODEL_OPTIONS = ["openai/gpt-image-2/edit"]
-    QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
-    CONTROL_MODE_OPTIONS = ["auto_legacy", "custom"]
-    SIZE_MODE_OPTIONS = [
-        "auto_from_input",
-        "max_from_input_aspect",
-        "max_for_aspect_ratio",
-        "aspect_ratio",
-        "preset",
-        "custom",
-        "auto_from_region",
-        "manual",
-    ]
-    SIZE_OPTIONS = [
+    QUALITY_OPTIONS = ["low", "medium", "high"]
+    SIZE_MODE_OPTIONS = ["preset", "aspect_ratio", "custom", "auto_from_region"]
+    IMAGE_SIZE_OPTIONS = [
         "auto",
         "square_hd",
         "square",
@@ -3220,38 +3210,19 @@ class NB2OpenAIImageEdit:
         "portrait_16_9",
         "landscape_4_3",
         "landscape_16_9",
-        "1024x768",
-        "1024x1024",
-        "1024x1536",
-        "1920x1080",
-        "2560x1440",
-        "3840x2160",
     ]
-    BACKGROUND_OPTIONS = ["auto", "opaque", "transparent"]
     FORMAT_OPTIONS = ["png", "webp", "jpeg"]
-    MODERATION_OPTIONS = ["auto", "low"]
+    RESOLUTION_OPTIONS = ["1K", "2K", "4K"]
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image_1": ("IMAGE",),
                 "prompt": ("STRING", {
                     "multiline": True,
                     "default": "Retouch only the masked region. Preserve the rest of the image.",
                 }),
-                "model": (cls.MODEL_OPTIONS, {"default": "openai/gpt-image-2/edit"}),
-                "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
-                "control_mode": (cls.CONTROL_MODE_OPTIONS, {
-                    "default": "auto_legacy",
-                    "tooltip": "auto_legacy keeps the original automatic sizing behavior; custom enables size overrides.",
-                }),
-                "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "auto_from_input"}),
-                "size": (cls.SIZE_OPTIONS, {"default": "auto"}),
-                "background": (cls.BACKGROUND_OPTIONS, {"default": "auto"}),
-                "output_format": (cls.FORMAT_OPTIONS, {"default": "png"}),
-                "output_compression": ("INT", {"default": 90, "min": 0, "max": 100, "step": 1}),
-                "moderation": (cls.MODERATION_OPTIONS, {"default": "auto"}),
+                "image_1": ("IMAGE",),
                 "api_key": ("STRING", {
                     "multiline": False,
                     "default": "",
@@ -3272,32 +3243,24 @@ class NB2OpenAIImageEdit:
                     "default": "OPENAI_API_KEY",
                     "placeholder": "OpenAI environment variable fallback",
                 }),
-                "high_quality_max_size": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "When quality is high and size is auto, request the largest valid size for the input aspect.",
-                }),
             },
             "optional": {
-                "mask_image": ("IMAGE",),
                 "image_2": ("IMAGE",),
-                "region_info": ("STRING",),
                 "image_3": ("IMAGE",),
                 "image_4": ("IMAGE",),
                 "image_5": ("IMAGE",),
                 "image_6": ("IMAGE",),
-                "image_7": ("IMAGE",),
-                "image_8": ("IMAGE",),
-                "custom_width": ("INT", {"default": 3840, "min": 512, "max": 3840, "step": 16}),
-                "custom_height": ("INT", {"default": 2160, "min": 512, "max": 3840, "step": 16}),
-                "aspect_ratio": (ASPECT_RATIO_OPTIONS, {
-                    "default": "auto",
-                    "tooltip": "Used when size_mode = max_for_aspect_ratio.",
-                }),
-                "resolution": (["1K", "2K", "4K"], {
-                    "default": "4K",
-                    "tooltip": "Used when size_mode = aspect_ratio. Long edge request, clamped to GPT Image limits.",
-                }),
+                "mask_image": ("IMAGE",),
+                "region_info": ("STRING",),
+                "size_mode": (cls.SIZE_MODE_OPTIONS, {"default": "preset"}),
+                "image_size": (cls.IMAGE_SIZE_OPTIONS, {"default": "auto"}),
+                "aspect_ratio": (ASPECT_RATIO_OPTIONS[1:], {"default": "16:9"}),
+                "resolution": (cls.RESOLUTION_OPTIONS, {"default": "1K"}),
+                "width": ("INT", {"default": 1920, "min": 16, "max": 4096, "step": 16}),
+                "height": ("INT", {"default": 1080, "min": 16, "max": 4096, "step": 16}),
+                "quality": (cls.QUALITY_OPTIONS, {"default": "high"}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 4}),
+                "output_format": (cls.FORMAT_OPTIONS, {"default": "png"}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
             },
         }
@@ -3307,8 +3270,9 @@ class NB2OpenAIImageEdit:
     FUNCTION = "edit_image"
     CATEGORY = "inpaint/api"
     DESCRIPTION = (
-        "Edits an image through FAL's GPT Image 2 edit endpoint. "
-        "Supports optional masks and safe auto sizing from the input crop."
+        "Simple GPT Image 2 edit payload through FAL. Supports reference "
+        "images, optional mask_image_url, preset/aspect/custom sizes, and "
+        "external per-node API key inputs."
     )
 
     def _looks_like_openai_api_key(self, value):
@@ -3649,36 +3613,28 @@ class NB2OpenAIImageEdit:
 
     def edit_image(
         self,
-        image_1,
         prompt,
-        model,
-        quality,
-        control_mode,
-        size_mode,
-        size,
-        background,
-        output_format,
-        output_compression,
-        moderation,
+        image_1,
         api_key,
         api_key_env_var,
         openai_api_key="",
         openai_api_key_env_var="OPENAI_API_KEY",
-        high_quality_max_size=True,
-        mask_image=None,
         image_2=None,
-        custom_width=3840,
-        custom_height=2160,
         image_3=None,
         image_4=None,
         image_5=None,
         image_6=None,
-        image_7=None,
-        image_8=None,
+        mask_image=None,
         region_info="",
-        aspect_ratio="auto",
-        resolution="4K",
+        size_mode="preset",
+        image_size="auto",
+        aspect_ratio="16:9",
+        resolution="1K",
+        width=1920,
+        height=1080,
+        quality="high",
         num_images=1,
+        output_format="png",
         sync_mode=False,
     ):
         try:
@@ -3697,164 +3653,106 @@ class NB2OpenAIImageEdit:
                 "OpenAI",
             )
 
-            input_images = [
-                image_1,
-                image_2,
-                image_3,
-                image_4,
-                image_5,
-                image_6,
-                image_7,
-                image_8,
-            ]
+            input_images = [image_1, image_2, image_3, image_4, image_5, image_6]
             image_urls = []
-            image_size = None
+            input_size = None
             for index, input_image in enumerate(input_images, start=1):
                 if input_image is None:
                     continue
                 image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
                 if index == 1:
-                    image_size = current_size
+                    input_size = current_size
                 image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
-            if image_size is None:
+            if input_size is None:
                 raise ValueError("image_1 is required.")
 
-            requested_size_mode = size_mode
-            customization_enabled = control_mode == "custom"
-            if customization_enabled:
-                effective_size_mode = size_mode
+            if size_mode == "aspect_ratio":
+                resolved_size = self._calculate_image_size_from_aspect_ratio(aspect_ratio, resolution)
+                size_source = f"aspect_ratio:{aspect_ratio}:{resolution}"
+            elif size_mode == "custom":
+                if int(width) % 16 != 0 or int(height) % 16 != 0:
+                    raise ValueError("Custom width and height must both be multiples of 16.")
+                resolved_size = self._normalize_custom_size(width, height)
+                size_source = "custom"
+            elif size_mode == "auto_from_region":
+                resolved_size, size_source = self._resolve_size(
+                    "auto_from_region",
+                    image_size,
+                    region_info,
+                    mask_image,
+                    input_size=input_size,
+                    custom_width=width,
+                    custom_height=height,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                )
             else:
-                effective_size_mode = "auto_from_input"
-            if customization_enabled and high_quality_max_size and quality == "high" and size_mode == "auto_from_input":
-                effective_size_mode = "max_from_input_aspect"
+                resolved_size = image_size
+                size_source = "preset"
 
-            resolved_size, size_source = self._resolve_size(
-                effective_size_mode,
-                size,
-                region_info,
-                mask_image,
-                input_size=image_size,
-                custom_width=custom_width,
-                custom_height=custom_height,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-            )
-
-            mask_url = None
-            if mask_image is not None:
-                mask_bytes = self._mask_tensor_to_png_bytes(mask_image, image_size)
-                mask_url = self._upload_to_fal(mask_bytes, "image/png", fal_api_key)
-
-            prompt_sent = _coerce_text_value(prompt)
-            image_size_sent = self._format_image_size(resolved_size)
             arguments = {
-                "prompt": prompt_sent,
+                "prompt": _coerce_text_value(prompt),
                 "image_urls": image_urls,
                 "openai_api_key": resolved_openai_api_key,
-                "image_size": image_size_sent,
-                "background": background,
+                "image_size": self._format_image_size(resolved_size),
+                "quality": quality,
+                "num_images": int(num_images),
                 "output_format": output_format,
-                "moderation": moderation,
+                "sync_mode": bool(sync_mode),
             }
-            if quality != "auto":
-                arguments["quality"] = quality
-            arguments["num_images"] = int(num_images)
-            if mask_url:
-                arguments["mask_image_url"] = mask_url
-            if output_format in ("jpeg", "webp"):
-                arguments["output_compression"] = int(output_compression)
-            arguments["sync_mode"] = bool(sync_mode)
+            if mask_image is not None:
+                mask_bytes, _ = self._image_tensor_to_png_bytes(mask_image)
+                arguments["mask_image_url"] = self._upload_to_fal(mask_bytes, "image/png", fal_api_key)
 
-            result = None
-            arguments_sent = arguments
-            fallback_used = ""
-            fallback_errors = []
-            try:
-                result = self._call_fal(model, arguments, fal_api_key)
-            except Exception as first_error:
-                if not _is_downstream_service_error(first_error):
-                    raise
-
-                fallback_errors.append(_summarize_remote_error(first_error))
-                fallback_attempts = []
-                if quality == "high":
-                    medium_args = dict(arguments)
-                    medium_args["quality"] = "medium"
-                    fallback_attempts.append(("medium_quality_same_size", medium_args))
-                if image_size_sent != "auto":
-                    auto_args = dict(arguments)
-                    auto_args["image_size"] = "auto"
-                    fallback_attempts.append(("auto_image_size", auto_args))
-                if quality == "high" and image_size_sent != "auto":
-                    medium_args = dict(arguments)
-                    medium_args["quality"] = "medium"
-                    if image_size_sent != "auto":
-                        medium_args["image_size"] = "auto"
-                    fallback_attempts.append(("medium_quality_auto_size", medium_args))
-
-                for fallback_label, fallback_args in fallback_attempts:
-                    try:
-                        logger.warning(
-                            "GPT Image downstream error; retrying with fallback %s.",
-                            fallback_label,
-                        )
-                        result = self._call_fal(model, fallback_args, fal_api_key)
-                        arguments_sent = fallback_args
-                        fallback_used = fallback_label
-                        break
-                    except Exception as fallback_error:
-                        fallback_errors.append(_summarize_remote_error(fallback_error))
-                        if not _is_downstream_service_error(fallback_error):
-                            raise
-
-                if result is None:
-                    raise RuntimeError(
-                        "GPT Image downstream service failed after fallback attempts: "
-                        + " | ".join(fallback_errors)
-                    ) from first_error
-
-            image_url = self._extract_result_image_url(result)
-            if not image_url:
+            result = self._call_fal("openai/gpt-image-2/edit", arguments, fal_api_key)
+            output_urls = []
+            candidates = result.get("images") if isinstance(result, dict) else None
+            if not candidates:
+                fallback_url = _coerce_text_value(result.get("image_url")) if isinstance(result, dict) else ""
+                candidates = [{"url": fallback_url}] if fallback_url else []
+            for item in candidates:
+                if isinstance(item, dict):
+                    url = _coerce_text_value(item.get("url") or item.get("image_url"))
+                    if url:
+                        output_urls.append(url)
+            if not output_urls:
                 raise RuntimeError("FAL GPT Image edit returned no output image URL.")
 
-            output_image = self._decode_image_result(image_url)
-            output_height = int(output_image.shape[1])
-            output_width = int(output_image.shape[2])
+            output_images = [self._decode_image_result(url) for url in output_urls]
+            first_shape = output_images[0].shape
+            if all(image.shape == first_shape for image in output_images):
+                output_batch = torch.cat(output_images, dim=0)
+            else:
+                output_batch = output_images[0]
+
             info = {
-                "model": model,
+                "endpoint": "openai/gpt-image-2/edit",
                 "quality": quality,
-                "control_mode": control_mode,
-                "customization_enabled": bool(customization_enabled),
-                "prompt_sent": prompt_sent,
-                "size_mode": requested_size_mode,
-                "effective_size_mode": effective_size_mode,
-                "high_quality_max_size": bool(high_quality_max_size),
+                "size_mode": size_mode,
                 "resolved_size": resolved_size,
-                "image_size_sent": image_size_sent,
-                "actual_image_size_sent": arguments_sent.get("image_size"),
-                "actual_quality_sent": arguments_sent.get("quality", "auto"),
-                "fallback_used": fallback_used,
+                "image_size_sent": arguments["image_size"],
                 "size_source": size_source,
                 "aspect_ratio": aspect_ratio,
                 "resolution": resolution,
                 "num_images": int(num_images),
                 "sync_mode": bool(sync_mode),
-                "input_width": int(image_size[0]),
-                "input_height": int(image_size[1]),
-                "output_width": output_width,
-                "output_height": output_height,
-                "background": background,
+                "input_width": int(input_size[0]),
+                "input_height": int(input_size[1]),
+                "output_width": int(output_batch.shape[2]),
+                "output_height": int(output_batch.shape[1]),
                 "output_format": output_format,
-                "moderation": moderation,
                 "fal_api_key_source": fal_api_key_source,
                 "openai_api_key_source": openai_api_key_source,
                 "mask_used": mask_image is not None,
                 "reference_image_count": max(0, len(image_urls) - 1),
                 "reference_image_used": len(image_urls) > 1,
-                "output_image_url": image_url,
+                "output_image_urls": output_urls,
                 "usage": result.get("usage") if isinstance(result, dict) else None,
             }
-            return (output_image, json.dumps(info))
+            if output_batch.shape[0] != len(output_urls):
+                info["warning"] = "Output images had different sizes; returned only the first image."
+
+            return (output_batch.cpu(), json.dumps(info))
         except Exception as e:
             error_summary = _summarize_remote_error(e)
             logger.error("OpenAI image edit failed: %s", error_summary)
