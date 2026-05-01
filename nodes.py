@@ -2287,6 +2287,7 @@ class NB2Florence2RegionSelector:
 
     REGION_TYPE_OPTIONS = ["glasses", "face", "upper_body", "lower_body", "full_body", "object"]
     SELECTION_MODE_OPTIONS = ["largest", "merge_all"]
+    DETECTION_MODE_OPTIONS = ["auto", "segmentation", "grounding_bbox"]
     REGION_QUERY_MAP = {
         "glasses": "eyeglasses",
         "face": "face",
@@ -2359,6 +2360,13 @@ class NB2Florence2RegionSelector:
                         "max": 4096,
                         "step": 64,
                         "tooltip": "Downscale longest image edge before upload. Lower this if FAL closes the connection.",
+                    },
+                ),
+                "detection_mode": (
+                    cls.DETECTION_MODE_OPTIONS,
+                    {
+                        "default": "auto",
+                        "tooltip": "Use grounding_bbox for face if segmentation grabs the wrong region.",
                     },
                 ),
             },
@@ -2842,6 +2850,7 @@ class NB2Florence2RegionSelector:
         api_key_env_var="FAL_KEY",
         mask_blur_percent=0.0,
         upload_max_dimension=2048,
+        detection_mode="auto",
     ):
         try:
             if not isinstance(image, torch.Tensor):
@@ -2874,20 +2883,25 @@ class NB2Florence2RegionSelector:
             mask_uint8 = None
             source = None
 
-            segmentation_result = self._call_segmentation(image_url, query, resolved_api_key)
-            polygons = self._coerce_polygon_entries(segmentation_result)
-            polygons = self._scale_polygons_if_needed(
-                polygons,
-                original_size,
-                uploaded_size,
-            )
-            if polygons:
-                mask_uint8 = self._render_mask_from_polygons(
-                    width, height, polygons, selection_mode
-                )
-                source = "referring-expression-segmentation"
+            detection_mode_effective = _coerce_text_value(detection_mode) or "auto"
+            if detection_mode_effective == "auto" and region_type == "face":
+                detection_mode_effective = "grounding_bbox"
 
-            if mask_uint8 is None:
+            if detection_mode_effective in ("auto", "segmentation"):
+                segmentation_result = self._call_segmentation(image_url, query, resolved_api_key)
+                polygons = self._coerce_polygon_entries(segmentation_result)
+                polygons = self._scale_polygons_if_needed(
+                    polygons,
+                    original_size,
+                    uploaded_size,
+                )
+                if polygons:
+                    mask_uint8 = self._render_mask_from_polygons(
+                        width, height, polygons, selection_mode
+                    )
+                    source = "referring-expression-segmentation"
+
+            if mask_uint8 is None and detection_mode_effective in ("auto", "grounding_bbox"):
                 grounding_result = self._call_grounding(image_url, query, resolved_api_key)
                 bboxes = self._coerce_bbox_entries(grounding_result)
                 bboxes = self._scale_bboxes_if_needed(
@@ -2903,6 +2917,11 @@ class NB2Florence2RegionSelector:
                     width, height, bboxes, selection_mode
                 )
                 source = "caption-to-phrase-grounding"
+
+            if mask_uint8 is None:
+                raise RuntimeError(
+                    f"Florence returned no usable region with detection_mode={detection_mode_effective}."
+                )
 
             bbox = self._mask_bbox(mask_uint8)
             padded_bbox = self._apply_padding(bbox, width, height, padding_percent)
@@ -2927,6 +2946,8 @@ class NB2Florence2RegionSelector:
                 "query": query,
                 "source": source,
                 "selection_mode": selection_mode,
+                "detection_mode": detection_mode,
+                "detection_mode_effective": detection_mode_effective,
                 "padding_percent": padding_percent,
                 "mask_blur_percent": float(mask_blur_percent),
                 "upload_max_dimension": int(upload_max_dimension),
@@ -3029,19 +3050,23 @@ class NB2OpenAIImageEdit:
                     "default": "OPENAI_API_KEY",
                     "placeholder": "OpenAI environment variable fallback",
                 }),
+                "high_quality_max_size": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When quality is high and size is auto, request the largest valid size for the input aspect.",
+                }),
             },
             "optional": {
                 "mask_image": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "region_info": ("STRING",),
-                "custom_width": ("INT", {"default": 3840, "min": 512, "max": 3840, "step": 16}),
-                "custom_height": ("INT", {"default": 2160, "min": 512, "max": 3840, "step": 16}),
                 "image_3": ("IMAGE",),
                 "image_4": ("IMAGE",),
                 "image_5": ("IMAGE",),
                 "image_6": ("IMAGE",),
                 "image_7": ("IMAGE",),
                 "image_8": ("IMAGE",),
+                "custom_width": ("INT", {"default": 3840, "min": 512, "max": 3840, "step": 16}),
+                "custom_height": ("INT", {"default": 2160, "min": 512, "max": 3840, "step": 16}),
             },
         }
 
@@ -3370,6 +3395,7 @@ class NB2OpenAIImageEdit:
         api_key_env_var,
         openai_api_key="",
         openai_api_key_env_var="OPENAI_API_KEY",
+        high_quality_max_size=True,
         mask_image=None,
         image_2=None,
         custom_width=3840,
@@ -3420,8 +3446,13 @@ class NB2OpenAIImageEdit:
             if image_size is None:
                 raise ValueError("image_1 is required.")
 
+            requested_size_mode = size_mode
+            effective_size_mode = size_mode
+            if high_quality_max_size and quality == "high" and size_mode == "auto_from_input":
+                effective_size_mode = "max_from_input_aspect"
+
             resolved_size, size_source = self._resolve_size(
-                size_mode,
+                effective_size_mode,
                 size,
                 region_info,
                 mask_image,
@@ -3465,7 +3496,9 @@ class NB2OpenAIImageEdit:
                 "model": model,
                 "quality": quality,
                 "prompt_sent": prompt_sent,
-                "size_mode": size_mode,
+                "size_mode": requested_size_mode,
+                "effective_size_mode": effective_size_mode,
+                "high_quality_max_size": bool(high_quality_max_size),
                 "resolved_size": resolved_size,
                 "image_size_sent": image_size_sent,
                 "size_source": size_source,

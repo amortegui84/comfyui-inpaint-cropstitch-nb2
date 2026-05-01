@@ -59,6 +59,7 @@ External Florence-2 region selector integrated into this repo. It calls FAL's Fl
 | region_type | choice | `glasses`, `face`, `upper_body`, `lower_body`, `full_body`, `object` |
 | custom_text | STRING | Required only when `region_type = object` |
 | selection_mode | choice | `largest` or `merge_all` |
+| detection_mode | choice | `auto`, `segmentation`, or `grounding_bbox`; `auto` uses bbox for face |
 | padding_percent | FLOAT | Expands the detected region bbox for downstream crop sizing |
 | return_rect_mask | BOOLEAN | Return a rectangular bbox mask instead of the raw semantic mask |
 | api_key | STRING | Optional direct API key input. Leave blank if using an env var |
@@ -144,6 +145,7 @@ External GPT Image 2 editor integrated into this repo through FAL. It calls `ope
 | output_format | choice | `png`, `webp`, `jpeg` |
 | output_compression | INT | Used for `webp` and `jpeg` outputs |
 | moderation | choice | `auto` or `low` |
+| high_quality_max_size | BOOLEAN | When `quality = high` and size is auto, request the largest valid size for the input aspect |
 | api_key | STRING | Optional direct FAL API key input |
 | api_key_env_var | STRING | FAL env var fallback, default `FAL_KEY` |
 | openai_api_key | STRING | Optional direct OpenAI API key input passed through to FAL |
@@ -163,6 +165,7 @@ NB2Florence2RegionSelector -> mask -> Smart Mask Crop -> OpenAI GPT Image Edit -
 Recommended default:
 
 - Use `size_mode = auto_from_input` for masked local edits. This preserves the crop size inferred by FAL and avoids accidental rescaling.
+- Leave `high_quality_max_size = True` if you expect `quality = high` to also request a larger image.
 - Use `max_from_input_aspect` when you want the largest output that keeps the base image aspect ratio within FAL's 4K limits.
 - Use `custom` plus `custom_width/custom_height` when you need a specific large output size.
 - Use `auto_from_region` only when you explicitly want Florence's aspect hint to drive a preset size.
