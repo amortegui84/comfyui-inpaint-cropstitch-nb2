@@ -3337,6 +3337,12 @@ class NB2OpenAIImageEdit:
             f"Missing {label} API key. Paste it into api_key or set the environment variable {env_name}."
         )
 
+    def _resolve_optional_api_key(self, api_key, api_key_env_var, looks_like_key, default_env_name, label):
+        try:
+            return self._resolve_api_key(api_key, api_key_env_var, looks_like_key, default_env_name, label)
+        except ValueError:
+            return "", "none"
+
     def _image_tensor_to_png_bytes(self, image_tensor):
         image_np = NB2Florence2RegionSelector()._normalize_image_array(image_tensor)
         mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
@@ -3656,7 +3662,7 @@ class NB2OpenAIImageEdit:
                 "FAL_KEY",
                 "FAL",
             )
-            resolved_openai_api_key, openai_api_key_source = self._resolve_api_key(
+            resolved_openai_api_key, openai_api_key_source = self._resolve_optional_api_key(
                 openai_api_key,
                 openai_api_key_env_var,
                 self._looks_like_openai_api_key,

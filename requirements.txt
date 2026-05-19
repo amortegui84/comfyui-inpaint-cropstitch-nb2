@@ -1,0 +1,5 @@
+fal-client>=0.4.1
+requests>=2.32.0
+pillow>=10.0.0
+numpy>=1.24.0
+scipy>=1.10.0

@@ -139,8 +139,8 @@ External GPT Image 2 editor integrated into this repo through FAL. This node now
 | prompt | STRING | Edit instruction |
 | api_key | STRING | Optional direct FAL API key input |
 | api_key_env_var | STRING | FAL env var fallback, default `FAL_KEY` |
-| openai_api_key | STRING | Optional direct OpenAI API key input passed through to FAL |
-| openai_api_key_env_var | STRING | OpenAI env var fallback, default `OPENAI_API_KEY` |
+| openai_api_key | STRING | Optional — leave blank. FAL handles OpenAI auth on the backend. You do not need a real OpenAI key. Wire your FAL key here only as a last resort if you see a key validation error |
+| openai_api_key_env_var | STRING | OpenAI env var fallback, default `OPENAI_API_KEY` — ignored when `openai_api_key` is blank |
 | image_2 ... image_6 | IMAGE | Optional reference images sent together with `image_1` |
 | mask_image | IMAGE | Optional mask image uploaded as `mask_image_url` |
 | region_info | STRING | Optional Smart Mask Crop `info`; used only when `size_mode = auto_from_region` |
@@ -351,18 +351,19 @@ Load any `.json` via **ComfyUI → Load** (drag & drop or File > Open).
 
 ## Installation
 
-### Option A — ComfyUI Manager (recommended)
+### Git clone
 
-Search for **comfyui-inpaint-cropstitch-nb2** in the Manager and click Install. Restart ComfyUI.
-
-### Option B — Git
+Open a terminal inside your ComfyUI `custom_nodes` folder and run:
 
 ```bash
-cd ComfyUI/custom_nodes
 git clone https://github.com/amortegui84/comfyui-inpaint-cropstitch-nb2
 ```
 
-Restart ComfyUI after cloning.
+Restart ComfyUI. **That is all.** Dependencies install automatically on first startup — you will see `[NB2] Installing...` lines in the console if anything was missing.
+
+### ComfyUI Manager
+
+Search for **comfyui-inpaint-cropstitch-nb2** and click Install. Restart ComfyUI.
 
 ### Updating
 
@@ -371,29 +372,37 @@ cd ComfyUI/custom_nodes/comfyui-inpaint-cropstitch-nb2
 git pull
 ```
 
-Restart ComfyUI after updating.
+Restart ComfyUI.
 
-### Python dependencies
+---
 
-This repo now includes external Florence-2 and GPT Image edit nodes through FAL. They need `fal-client` plus the normal HTTP/image dependencies in the same Python environment ComfyUI uses.
+### If auto-install fails — ComfyUI Windows Portable
 
-```bash
-python -m pip install fal-client requests pillow numpy
+ComfyUI portable ships with its own embedded Python interpreter. If the auto-install step fails, run this **once** from a regular CMD window (replace the path with wherever your portable build lives):
+
+```cmd
+"X:\path\to\ComfyUI_windows_portable\python_embeded\python.exe" -m pip install fal-client requests pillow numpy scipy
 ```
 
-Restart ComfyUI after installing dependencies.
+If pip itself is missing, bootstrap it first:
 
-### Git LFS note
-
-This repo tracks `assets/demo.mp4` with Git LFS. The nodes and workflows still work without that demo file, but if you want the full asset after `git clone` or `git pull`, install Git LFS once on the machine:
-
-```bash
-git lfs install
+```cmd
+"X:\path\to\ComfyUI_windows_portable\python_embeded\python.exe" -m ensurepip
 ```
 
-### Optional dependency — Florence2
+Then re-run the install command above. **Fully close and reopen ComfyUI** — a browser refresh alone is not enough.
 
-Optional only if you also want the fully local `Florence2Run` path from kijai. That path runs **fully local — no API key needed**.
+Verify:
+
+```cmd
+"X:\path\to\ComfyUI_windows_portable\python_embeded\python.exe" -m pip list | findstr fal-client
+```
+
+---
+
+### Optional — local Florence2
+
+Only needed if you want the fully local `Florence2Run` path (no API key required):
 
 ```bash
 cd ComfyUI/custom_nodes
@@ -401,6 +410,48 @@ git clone https://github.com/kijai/ComfyUI-Florence2
 ```
 
 Or search **ComfyUI-Florence2** in the Manager.
+
+### Git LFS
+
+This repo tracks `assets/demo.mp4` with Git LFS. The nodes and workflows work without it. To fetch the demo file:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+---
+
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'fal_client'`
+
+**Cause:** ComfyUI portable ships with its own embedded Python interpreter. Packages installed against system Python are invisible to it. A plain `pip install fal-client` from a normal terminal does nothing for ComfyUI portable.
+
+**Fix:** Use the embedded Python executable directly (see the Windows Portable section above). Fully close and reopen ComfyUI after installing — a browser refresh alone is not enough.
+
+---
+
+### `RuntimeError: Missing OpenAI API key` on the GPT Image Edit node
+
+**What is actually happening:** Despite the error message, the `OpenAI GPT Image Edit` node does **not** call OpenAI directly. Every request goes to FAL's hosted GPT Image 2 relay (`openai/gpt-image-2/edit`). FAL authenticates to OpenAI on the backend using its own credentials. Your FAL key is what authenticates the call.
+
+The `openai_api_key` field on the node is passed through to FAL as a string parameter. In newer versions of this repo the field is optional — leaving it blank is fine and the node will proceed using FAL authentication alone.
+
+**Fix (current version):** Leave `openai_api_key` blank. The node no longer throws an error when the field is empty.
+
+**Workaround (older versions):** Wire your FAL key into **both** `api_key` and `openai_api_key`. The validation only checks that the field is non-empty; it does not verify that the value is a real `sk-...` OpenAI key.
+
+Where to find your FAL key: [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys) — format: `<id>:<secret>`
+
+---
+
+### Sanity checklist after a fresh install
+
+- [ ] ComfyUI fully restarted (not just a browser refresh)
+- [ ] `fal-client` visible to the embedded Python — run `python_embeded\python.exe -m pip list | findstr fal-client`
+- [ ] FAL key wired into every `api_key` input (Florence selector and edit nodes)
+- [ ] Test queue one image — confirm the console shows HTTP 200 responses to `rest.fal.ai`
 
 ---
 

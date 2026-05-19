@@ -1,3 +1,24 @@
+import importlib
+import subprocess
+import sys
+
+_REQUIRED = [
+    ("fal_client", "fal-client>=0.4.1"),
+    ("PIL", "pillow>=10.0.0"),
+    ("requests", "requests>=2.32.0"),
+    ("numpy", "numpy>=1.24.0"),
+    ("scipy", "scipy>=1.10.0"),
+]
+
+for _module, _package in _REQUIRED:
+    if importlib.util.find_spec(_module) is None:
+        print(f"[NB2] Installing missing dependency: {_package}")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", _package])
+        except Exception as _e:
+            print(f"[NB2] WARNING: could not auto-install {_package}: {_e}")
+            print(f"[NB2] Install manually: python -m pip install {_package}")
+
 from .nodes import (
     InpaintCropNB2,
     InpaintStitchNB2,
