@@ -1,0 +1,605 @@
+{
+  "id": "cf44dd07-0852-4184-9c6b-b2710a542298",
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 13,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        50,
+        150
+      ],
+      "size": [
+        282,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1,
+            2
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "product.png",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [
+        50,
+        540
+      ],
+      "size": [
+        282,
+        314
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "reference.png",
+        "image"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "NB2Florence2RegionSelector",
+      "pos": [
+        390,
+        150
+      ],
+      "size": [
+        310,
+        340
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "mask_image",
+          "type": "IMAGE",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": [
+            12
+          ]
+        },
+        {
+          "name": "center_x",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "center_y",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "crop_width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "crop_height",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "Node name for S&R": "NB2Florence2RegionSelector"
+      },
+      "widgets_values": [
+        "object",
+        "product",
+        "largest",
+        10,
+        false,
+        "",
+        "FAL_KEY"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "SmartMaskCrop",
+      "pos": [
+        760,
+        150
+      ],
+      "size": [
+        310,
+        440
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 3
+        },
+        {
+          "name": "region_info",
+          "type": "STRING",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "cropped_image",
+          "type": "IMAGE",
+          "links": [
+            5,
+            11
+          ]
+        },
+        {
+          "name": "cropped_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "cropped_mask_image",
+          "type": "IMAGE",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "preview_image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": [
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "Node name for S&R": "SmartMaskCrop"
+      },
+      "widgets_values": [
+        1.12,
+        true,
+        0,
+        0,
+        "upscale_to_target_if_smaller",
+        2048,
+        2048,
+        "bilinear",
+        "bicubic",
+        "gpu (much faster)",
+        true,
+        true,
+        100
+      ]
+    },
+    {
+      "id": 5,
+      "type": "NB2OpenAIImageEdit",
+      "pos": [
+        1130,
+        150
+      ],
+      "size": [
+        400,
+        600
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image_1",
+          "type": "IMAGE",
+          "link": 5
+        },
+        {
+          "name": "image_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "name": "mask_image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 7
+        },
+        {
+          "name": "region_info",
+          "type": "STRING",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            8
+          ]
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "Node name for S&R": "NB2OpenAIImageEdit"
+      },
+      "widgets_values": [
+        "Edit only the masked region. Use the reference image (Image 2) to inform the edit. Preserve the background, lighting, and everything outside the mask exactly as in Image 1.",
+        "",
+        "FAL_KEY",
+        "",
+        "OPENAI_API_KEY",
+        "auto_from_region",
+        "auto",
+        "16:9",
+        "1K",
+        1024,
+        1024,
+        "high",
+        1,
+        "png",
+        false
+      ]
+    },
+    {
+      "id": 6,
+      "type": "SmartMaskStitch",
+      "pos": [
+        1590,
+        150
+      ],
+      "size": [
+        288,
+        100
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "stitcher",
+          "type": "STITCHER",
+          "link": 4
+        },
+        {
+          "name": "edited_image",
+          "type": "IMAGE",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "amortegui84/comfyui-inpaint-cropstitch-nb2",
+        "Node name for S&R": "SmartMaskStitch"
+      },
+      "widgets_values": [
+        4,
+        1.5
+      ]
+    },
+    {
+      "id": 7,
+      "type": "SaveImage",
+      "pos": [
+        1940,
+        150
+      ],
+      "size": [
+        310,
+        130
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 9
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "ComfyUI"
+      ]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [
+        1940,
+        340
+      ],
+      "size": [
+        310,
+        260
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 9,
+      "type": "PreviewImage",
+      "pos": [
+        760,
+        660
+      ],
+      "size": [
+        310,
+        260
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 10
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 10,
+      "type": "PreviewImage",
+      "pos": [
+        1130,
+        660
+      ],
+      "size": [
+        310,
+        260
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      1,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      1,
+      "MASK"
+    ],
+    [
+      4,
+      4,
+      0,
+      6,
+      0,
+      "STITCHER"
+    ],
+    [
+      5,
+      4,
+      1,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      6,
+      2,
+      0,
+      5,
+      1,
+      "IMAGE"
+    ],
+    [
+      7,
+      4,
+      3,
+      5,
+      2,
+      "IMAGE"
+    ],
+    [
+      8,
+      5,
+      0,
+      6,
+      1,
+      "IMAGE"
+    ],
+    [
+      9,
+      6,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      10,
+      3,
+      1,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      11,
+      4,
+      1,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      12,
+      3,
+      2,
+      4,
+      2,
+      "STRING"
+    ],
+    [
+      13,
+      4,
+      5,
+      5,
+      3,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}
