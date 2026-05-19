@@ -256,18 +256,20 @@
       },
       "widgets_values": [
         "Edit only the selected object area. Preserve the rest of the crop and keep edges clean for stitching.",
-        "openai/gpt-image-2/edit",
-        "high",
-        "auto_from_input",
-        "auto",
-        "auto",
-        "png",
-        90,
-        "auto",
         "",
         "FAL_KEY",
         "",
-        "OPENAI_API_KEY"
+        "OPENAI_API_KEY",
+        "auto_from_region",
+        "auto",
+        "16:9",
+        "1K",
+        1024,
+        1024,
+        "high",
+        1,
+        "png",
+        false
       ]
     },
     {
