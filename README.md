@@ -85,6 +85,40 @@ NB2Florence2RegionSelector -> mask -> NB2 Smart Region -> NB2 Crop -> Nano Banan
 
 ---
 
+### SAM 3 Image Segmenter (FAL API)
+
+External SAM 3 selector integrated through FAL. It returns the same outputs as the Florence selector, so it can feed `NB2 Smart Region`, `Smart Mask Crop`, or `Smart Object Isolate Crop` without changing the downstream workflow.
+
+Endpoint: `fal-ai/sam-3/image`
+
+| Input | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image to segment |
+| prompt | STRING | Text prompt such as `bra`, `pants`, `glasses`, or `wheel` |
+| selection_mode | choice | `largest`, `first`, or `merge_all` when multiple masks are returned |
+| padding_percent | FLOAT | Expands the selected mask bbox for downstream crop sizing |
+| return_rect_mask | BOOLEAN | Return a rectangular bbox mask instead of the raw SAM mask |
+| api_key | STRING | Optional direct FAL API key. Leave blank if using an env var |
+| api_key_env_var | STRING | Env var fallback, default `FAL_KEY` |
+| mask_blur_percent | FLOAT | Optional soft blur applied to the returned mask |
+| return_multiple_masks / max_masks | BOOLEAN / INT | Ask SAM 3 for multiple candidates, up to 32 |
+| point_prompts_json / box_prompts_json | STRING | Optional JSON lists for point or box prompts |
+
+Outputs: `mask`, `mask_image`, `info`, `center_x`, `center_y`, `crop_width`, `crop_height`
+
+Recommended flow:
+```
+SAM 3 Image Segmenter -> mask -> Smart Object Isolate Crop -> Seedream 4.5 Edit -> Smart Mask Stitch
+```
+
+For two independent garment passes:
+```
+SAM 3 "bra"   -> Smart Object Isolate Crop -> Seedream 4.5 Edit \
+SAM 3 "pants" -> Smart Object Isolate Crop -> Seedream 4.5 Edit  -> Smart Mask Multi Stitch -> final image
+```
+
+---
+
 ### NB2 Mask Generator
 
 Interactive node that generates a rectangular mask at an exact position on the original image, with an aspect ratio that matches an NB2 resolution.
@@ -275,6 +309,44 @@ NB2Florence2RegionSelector or Florence2Run (kijai) -> mask -> Smart Mask Crop ->
 
 ---
 
+### Smart Object Isolate Crop
+
+Local object crop for sensitive garment/object detail enhancement. Unlike `Smart Mask Crop`, this node hides every pixel outside the semantic mask before the image is sent to GPT Image. It outputs an RGBA isolated crop plus a matching mask image, so the model sees only the selected object while the stitcher can still paste the result back into the source image.
+
+Recommended for garment-detail passes where the garment already exists and the goal is texture/detail enhancement, not replacement.
+
+| Input | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image |
+| mask | MASK | Semantic object mask, usually from Florence-2 `region_type = object` |
+| resize_mode | choice | Keep local size, upscale if smaller, or force target size |
+| target_size_mode | choice | `manual_width_height` or `max_for_aspect_ratio` |
+| target_aspect_ratio | choice | Usually `mask_bbox` for tight object crops |
+| mask_expand_percent | FLOAT | Small edit expansion; keep near `0` for no body context |
+| alpha_feather_percent | FLOAT | Soft object edge for isolation and final paste |
+| outside_fill | choice | RGB fill outside the object in case a model ignores alpha |
+| edge_guard_percent | FLOAT | Keeps the crop border uneditable so models do not complete cut-off garments |
+| region_info | STRING | Optional Florence or SAM info for sizing metadata |
+
+Outputs: `stitcher`, `isolated_image`, `isolated_mask`, `isolated_mask_image`, `preview_image`, `info`
+
+Wire `isolated_image` into `OpenAI GPT Image Edit -> image_1`, `isolated_mask_image` into `mask_image`, and `info` into `region_info`. Set GPT `size_mode = auto_from_region`.
+
+For separate top/bottom passes, run two independent Florence or SAM selectors and two independent GPT Image calls, then combine them with `Smart Mask Multi Stitch`.
+
+Typical garment detail flow:
+```
+Florence object "bra"   -> Smart Object Isolate Crop -> GPT Image 2 Edit \
+Florence object "pants" -> Smart Object Isolate Crop -> GPT Image 2 Edit  -> Smart Mask Multi Stitch -> final image
+```
+
+Prompt guidance:
+```
+Enhance fabric texture, seams, weave, stitching, and material detail on the visible isolated garment only. Preserve the exact existing silhouette, crop boundaries, cut-off edges, position, scale, and blank background. Do not complete missing garment parts, extend fabric beyond the visible area, change the outline, add body, skin, person, mannequin, or scene context.
+```
+
+---
+
 ### Smart Mask Stitch
 
 Pastes a locally edited masked crop back into the original image using the stored local mask as the primary blend.
@@ -287,6 +359,24 @@ Pastes a locally edited masked crop back into the original image using the store
 | result_mask_feather_percent | FLOAT | Extra blur on the stored local mask used for final blending |
 
 Outputs: `image`
+
+---
+
+### Smart Mask Multi Stitch
+
+Applies up to four independent local masked edits onto one accumulated final image. Use this when separate object calls, such as top and bottom garments, were generated independently but must be pasted back into the same final image without one stitch overwriting the other.
+
+Inputs: `stitcher_1`, `edited_image_1`, optional `stitcher_2`/`edited_image_2` through `stitcher_4`/`edited_image_4`, plus shared feather controls.
+
+Outputs: `image`
+
+---
+
+### Seedream 4.5 Edit
+
+FAL wrapper for `fal-ai/bytedance/seedream/v4.5/edit`. This model accepts image references and natural-language instructions, but no explicit mask. For local garment workflows, send `Smart Object Isolate Crop -> isolated_image` as `image_1`, optional garment/product references as `image_2+`, then paste the result back with `Smart Mask Stitch` or `Smart Mask Multi Stitch`.
+
+Use `image_size_mode = auto_from_region` when the crop info is connected, so Seedream requests the same size as the isolated crop.
 
 ---
 
@@ -339,13 +429,24 @@ NB2Florence2RegionSelector or Florence2Run (kijai)
 
 | File | Description |
 |---|---|
-| `inpainting_workflow.json` | Original NB2 crop/stitch workflow |
-| `01_nb2_smart_region_face_roundtrip.json` | FAL Florence-2 → NB2 Smart Region → NB2 round-trip |
-| `02_local_mask_edit_face_gpt_image2.json` | FAL Florence-2 → Smart Mask Crop → GPT Image 2 |
-| `03_local_mask_edit_object_template.json` | Object local mask edit template |
-| `04_nb2_upper_body_template.json` | Upper body NB2 template |
+| `00_manual_nb2_crop_stitch_nano_banana2.json` | Manual rectangle mask -> NB2 Crop -> Nano Banana 2 Edit -> NB2 Stitch |
+| `01_florence_face_nb2_roundtrip.json` | Florence-2 face selector -> NB2 Smart Region -> NB2 Crop/Stitch round trip |
+| `02_florence_face_gpt_image2_mask_edit.json` | Florence-2 face selector -> Smart Mask Crop -> GPT Image 2 masked edit |
+| `03_florence_object_gpt_image2_mask_edit.json` | Florence-2 object selector -> Smart Mask Crop -> GPT Image 2 masked edit |
+| `04_florence_upper_body_nb2_roundtrip.json` | Florence-2 upper-body selector -> NB2 Smart Region -> NB2 Crop/Stitch round trip |
+| `05_florence_product_gpt_image2_mask_edit.json` | Florence-2 product/object selector -> Smart Mask Crop -> GPT Image 2 masked edit |
+| `06_florence_garment_detail_gpt_image2_multistitch.json` | Florence-2 top/bottom garment selectors -> isolated GPT Image 2 detail passes -> Smart Mask Multi Stitch |
+| `07_florence_garment_detail_seedream45_multistitch.json` | Florence-2 top/bottom garment selectors -> isolated Seedream 4.5 detail passes -> Smart Mask Multi Stitch |
+| `08_sam3_garment_detail_seedream45_multistitch.json` | SAM 3 top/bottom garment selectors -> isolated Seedream 4.5 detail passes -> Smart Mask Multi Stitch |
 
-Load any `.json` via **ComfyUI → Load** (drag & drop or File > Open).
+Load any `.json` via **ComfyUI -> Load** (drag & drop or File > Open).
+
+Recommended starting points:
+
+- Use `08_sam3_garment_detail_seedream45_multistitch.json` for the newest garment-detail workflow.
+- Use `07_florence_garment_detail_seedream45_multistitch.json` if Florence-2 selects the object better on a specific image.
+- Use `06_florence_garment_detail_gpt_image2_multistitch.json` when the editor must receive an explicit mask.
+- Use `00_manual_nb2_crop_stitch_nano_banana2.json` for manual NB2 crop/stitch tests.
 
 ---
 

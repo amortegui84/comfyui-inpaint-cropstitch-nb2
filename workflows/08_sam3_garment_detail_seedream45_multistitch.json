@@ -1,0 +1,300 @@
+{
+  "id": "f4d4f7d8-1e27-4df8-9ce5-sam3-seedream45-garment-detail",
+  "revision": 0,
+  "last_node_id": 11,
+  "last_link_id": 21,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [40, 300],
+      "size": [290, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [1, 8]},
+        {"name": "MASK", "type": "MASK", "links": null}
+      ],
+      "properties": {"Node name for S&R": "LoadImage"},
+      "widgets_values": ["source.png", "image"]
+    },
+    {
+      "id": 10,
+      "type": "LoadImage",
+      "pos": [40, -70],
+      "size": [290, 314],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [18]},
+        {"name": "MASK", "type": "MASK", "links": null}
+      ],
+      "properties": {"Node name for S&R": "LoadImage"},
+      "widgets_values": ["bra_reference.png", "image"]
+    },
+    {
+      "id": 11,
+      "type": "LoadImage",
+      "pos": [40, 850],
+      "size": [290, 314],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [19]},
+        {"name": "MASK", "type": "MASK", "links": null}
+      ],
+      "properties": {"Node name for S&R": "LoadImage"},
+      "widgets_values": ["pants_reference.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "NB2SAM3ImageSegmenter",
+      "pos": [370, 80],
+      "size": [330, 340],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [{"name": "image", "type": "IMAGE", "link": 1}],
+      "outputs": [
+        {"name": "mask", "type": "MASK", "links": [2]},
+        {"name": "mask_image", "type": "IMAGE", "links": null},
+        {"name": "info", "type": "STRING", "links": [3]},
+        {"name": "center_x", "type": "INT", "links": null},
+        {"name": "center_y", "type": "INT", "links": null},
+        {"name": "crop_width", "type": "INT", "links": null},
+        {"name": "crop_height", "type": "INT", "links": null}
+      ],
+      "properties": {"Node name for S&R": "NB2SAM3ImageSegmenter"},
+      "widgets_values": ["bra", "largest", 0, false, "", "FAL_KEY", 0, 2048, true, 3, true, true, "", ""]
+    },
+    {
+      "id": 3,
+      "type": "SmartObjectIsolateCrop",
+      "pos": [760, 70],
+      "size": [340, 470],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "IMAGE", "link": 1},
+        {"name": "mask", "type": "MASK", "link": 2},
+        {"name": "region_info", "type": "STRING", "link": 3}
+      ],
+      "outputs": [
+        {"name": "stitcher", "type": "STITCHER", "links": [6]},
+        {"name": "isolated_image", "type": "IMAGE", "links": [4]},
+        {"name": "isolated_mask", "type": "MASK", "links": null},
+        {"name": "isolated_mask_image", "type": "IMAGE", "links": null},
+        {"name": "preview_image", "type": "IMAGE", "links": null},
+        {"name": "info", "type": "STRING", "links": [7]}
+      ],
+      "properties": {"Node name for S&R": "SmartObjectIsolateCrop"},
+      "widgets_values": [
+        "upscale_to_target_if_smaller",
+        2048,
+        2048,
+        0,
+        2.5,
+        "manual_width_height",
+        "mask_bbox",
+        "gray",
+        "bilinear",
+        "bicubic",
+        "gpu (much faster)",
+        false,
+        "",
+        3.0,
+        12.0,
+        18.0
+      ]
+    },
+    {
+      "id": 4,
+      "type": "NB2Seedream45Edit",
+      "pos": [1160, 70],
+      "size": [440, 520],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "image_1", "type": "IMAGE", "link": 4},
+        {"name": "image_2", "type": "IMAGE", "link": 18},
+        {"name": "region_info", "type": "STRING", "link": 7}
+      ],
+      "outputs": [
+        {"name": "images", "type": "IMAGE", "links": [10]},
+        {"name": "info", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "NB2Seedream45Edit"},
+      "widgets_values": [
+        "Edit only Image 1's visible garment area. Use Image 1 as the locked crop, pose, skin, local background, garment silhouette, cut-off edges, position, and scale. Use Image 2 only as a garment detail reference. Preserve all skin and body pixels around or through transparent fabric. Do not complete missing parts, extend fabric, change outline, add body, change pose, or transfer Image 2 background. Enhance fabric texture, seams, lace, mesh, trims, weave, stitching, pattern, transparency, and construction only.",
+          "",
+          "FAL_KEY",
+          "",
+          "auto_4K",
+        2048,
+        2048,
+        1,
+        1,
+        -1,
+        true,
+        false
+      ]
+    },
+    {
+      "id": 5,
+      "type": "NB2SAM3ImageSegmenter",
+      "pos": [370, 530],
+      "size": [330, 340],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [{"name": "image", "type": "IMAGE", "link": 8}],
+      "outputs": [
+        {"name": "mask", "type": "MASK", "links": [9]},
+        {"name": "mask_image", "type": "IMAGE", "links": null},
+        {"name": "info", "type": "STRING", "links": [11]},
+        {"name": "center_x", "type": "INT", "links": null},
+        {"name": "center_y", "type": "INT", "links": null},
+        {"name": "crop_width", "type": "INT", "links": null},
+        {"name": "crop_height", "type": "INT", "links": null}
+      ],
+      "properties": {"Node name for S&R": "NB2SAM3ImageSegmenter"},
+      "widgets_values": ["pants", "largest", 0, false, "", "FAL_KEY", 0, 2048, true, 3, true, true, "", ""]
+    },
+    {
+      "id": 6,
+      "type": "SmartObjectIsolateCrop",
+      "pos": [760, 520],
+      "size": [340, 470],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "IMAGE", "link": 8},
+        {"name": "mask", "type": "MASK", "link": 9},
+        {"name": "region_info", "type": "STRING", "link": 11}
+      ],
+      "outputs": [
+        {"name": "stitcher", "type": "STITCHER", "links": [12]},
+        {"name": "isolated_image", "type": "IMAGE", "links": [13]},
+        {"name": "isolated_mask", "type": "MASK", "links": null},
+        {"name": "isolated_mask_image", "type": "IMAGE", "links": null},
+        {"name": "preview_image", "type": "IMAGE", "links": null},
+        {"name": "info", "type": "STRING", "links": [15]}
+      ],
+      "properties": {"Node name for S&R": "SmartObjectIsolateCrop"},
+      "widgets_values": [
+        "upscale_to_target_if_smaller",
+        2048,
+        2048,
+        0,
+        2.5,
+        "manual_width_height",
+        "mask_bbox",
+        "gray",
+        "bilinear",
+        "bicubic",
+        "gpu (much faster)",
+        false,
+        "",
+        3.0,
+        12.0,
+        18.0
+      ]
+    },
+    {
+      "id": 7,
+      "type": "NB2Seedream45Edit",
+      "pos": [1160, 520],
+      "size": [440, 520],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {"name": "image_1", "type": "IMAGE", "link": 13},
+        {"name": "image_2", "type": "IMAGE", "link": 19},
+        {"name": "region_info", "type": "STRING", "link": 15}
+      ],
+      "outputs": [
+        {"name": "images", "type": "IMAGE", "links": [16]},
+        {"name": "info", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "NB2Seedream45Edit"},
+      "widgets_values": [
+        "Edit only Image 1's visible garment area. Use Image 1 as the locked crop, pose, skin, local background, garment silhouette, cut-off edges, position, and scale. Use Image 2 only as a garment detail reference. Preserve all skin and body pixels around or through transparent fabric. Do not complete missing parts, extend fabric, change outline, add body, change pose, or transfer Image 2 background. Enhance fabric texture, seams, lace, mesh, trims, weave, stitching, pattern, transparency, and construction only.",
+          "",
+          "FAL_KEY",
+          "",
+          "auto_4K",
+        2048,
+        2048,
+        1,
+        1,
+        -1,
+        true,
+        false
+      ]
+    },
+    {
+      "id": 8,
+      "type": "SmartMaskMultiStitch",
+      "pos": [1660, 300],
+      "size": [360, 260],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {"name": "stitcher_1", "type": "STITCHER", "link": 6},
+        {"name": "edited_image_1", "type": "IMAGE", "link": 10},
+        {"name": "stitcher_2", "type": "STITCHER", "link": 12},
+        {"name": "edited_image_2", "type": "IMAGE", "link": 16}
+      ],
+      "outputs": [{"name": "image", "type": "IMAGE", "links": [17]}],
+      "properties": {"Node name for S&R": "SmartMaskMultiStitch"},
+      "widgets_values": [1.0, 1.0]
+    },
+    {
+      "id": 9,
+      "type": "SaveImage",
+      "pos": [2070, 300],
+      "size": [300, 270],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 17}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "SaveImage"},
+      "widgets_values": ["sam3_isolated_garment_detail_seedream45"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 2, 0, 3, 1, "MASK"],
+    [3, 2, 2, 3, 2, "STRING"],
+    [4, 3, 1, 4, 0, "IMAGE"],
+    [6, 3, 0, 8, 0, "STITCHER"],
+    [7, 3, 5, 4, 10, "STRING"],
+    [8, 1, 0, 5, 0, "IMAGE"],
+    [9, 5, 0, 6, 1, "MASK"],
+    [10, 4, 0, 8, 1, "IMAGE"],
+    [11, 5, 2, 6, 2, "STRING"],
+    [12, 6, 0, 8, 2, "STITCHER"],
+    [13, 6, 1, 7, 0, "IMAGE"],
+    [15, 6, 5, 7, 10, "STRING"],
+    [16, 7, 0, 8, 3, "IMAGE"],
+    [17, 8, 0, 9, 0, "IMAGE"],
+    [18, 10, 0, 4, 1, "IMAGE"],
+    [19, 11, 0, 7, 1, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

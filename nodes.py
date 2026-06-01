@@ -282,6 +282,40 @@ def _normalize_gpt_image_size(width, height):
     return int(width), int(height)
 
 
+def _normalize_seedream_image_size(width, height):
+    width = max(64, float(width))
+    height = max(64, float(height))
+    ratio = width / max(1.0, height)
+    max_edge = 4096
+    min_pixels = 2560 * 1440
+    max_pixels = 4096 * 4096
+
+    scale = min(max_edge / width, max_edge / height, 1.0)
+    width *= scale
+    height *= scale
+
+    pixels = width * height
+    if pixels < min_pixels:
+        scale = math.sqrt(min_pixels / max(1.0, pixels))
+        width *= scale
+        height *= scale
+    elif pixels > max_pixels:
+        scale = math.sqrt(max_pixels / max(1.0, pixels))
+        width *= scale
+        height *= scale
+
+    if width > max_edge:
+        width = max_edge
+        height = width / ratio
+    if height > max_edge:
+        height = max_edge
+        width = height * ratio
+
+    width = max(64, int(round(width / 16.0) * 16))
+    height = max(64, int(round(height / 16.0) * 16))
+    return int(min(max_edge, width)), int(min(max_edge, height))
+
+
 def _get_region_edit_hints(region_type):
     region_type = _coerce_text_value(region_type)
     hints = REGION_EDIT_HINTS.get(region_type)
@@ -1935,6 +1969,337 @@ class SmartMaskCrop:
         return result
 
 
+class SmartObjectIsolateCrop:
+    """
+    Crop a detected object and hide every pixel outside the semantic mask.
+
+    This is intended for restricted-region detail enhancement: the editor sees
+    only the garment/object, while the stitcher still knows where to paste the
+    result back into the original image.
+    """
+
+    FILL_COLOR_OPTIONS = ["black", "white", "gray", "transparent_rgb_black"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "resize_mode": (["keep_local_size", "upscale_to_target_if_smaller", "resize_to_target"], {
+                    "default": "upscale_to_target_if_smaller",
+                }),
+                "target_width": ("INT", {
+                    "default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1,
+                }),
+                "target_height": ("INT", {
+                    "default": 1024, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 1,
+                }),
+                "mask_expand_percent": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 30.0, "step": 0.5,
+                    "tooltip": "Small expansion for edit coverage. Keep near 0 to avoid body context.",
+                }),
+                "alpha_feather_percent": ("FLOAT", {
+                    "default": 1.5, "min": 0.0, "max": 20.0, "step": 0.25,
+                    "tooltip": "Softens the isolated object edge and final paste mask.",
+                }),
+                "target_size_mode": (["manual_width_height", "max_for_aspect_ratio"], {
+                    "default": "max_for_aspect_ratio",
+                }),
+                "target_aspect_ratio": (["mask_bbox", "input_image"] + ASPECT_RATIO_OPTIONS[1:], {
+                    "default": "mask_bbox",
+                }),
+                "outside_fill": (cls.FILL_COLOR_OPTIONS, {
+                    "default": "gray",
+                    "tooltip": "RGB color written outside the object in case a downstream model ignores alpha.",
+                }),
+                "downscale_algorithm": (["nearest", "bilinear", "bicubic", "lanczos",
+                                         "box", "hamming"], {"default": "bilinear"}),
+                "upscale_algorithm": (["nearest", "bilinear", "bicubic", "lanczos",
+                                         "box", "hamming"], {"default": "bicubic"}),
+                "device_mode": (["gpu (much faster)", "cpu (compatible)"],
+                                {"default": "gpu (much faster)"}),
+                "depad_florence": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Keep True when the mask comes from Florence-2.",
+                }),
+            },
+            "optional": {
+                "region_info": ("STRING",),
+                "edge_guard_percent": ("FLOAT", {
+                    "default": 3.0, "min": 0.0, "max": 15.0, "step": 0.25,
+                    "tooltip": (
+                        "Forces the outer crop border to remain uneditable. "
+                        "This discourages image editors from completing garments "
+                        "that are cut off by the crop or source frame."
+                    ),
+                }),
+                "crop_padding_percent": ("FLOAT", {
+                    "default": 8.0, "min": 0.0, "max": 60.0, "step": 0.5,
+                    "tooltip": "Expands the crop around the garment so nearby original skin/background can be preserved.",
+                }),
+                "visible_context_percent": ("FLOAT", {
+                    "default": 10.0, "min": 0.0, "max": 80.0, "step": 0.5,
+                    "tooltip": (
+                        "Shows a small ring of original pixels around the garment to the editor. "
+                        "The edit mask remains limited to the garment."
+                    ),
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STITCHER", "IMAGE", "MASK", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = (
+        "stitcher",
+        "isolated_image",
+        "isolated_mask",
+        "isolated_mask_image",
+        "preview_image",
+        "info",
+    )
+    FUNCTION = "isolate_crop"
+    CATEGORY = "inpaint/masked"
+    DESCRIPTION = (
+        "Crops an object and returns an RGBA isolated image plus matching mask "
+        "for GPT Image detail enhancement without body/background context."
+    )
+
+    def _fill_value(self, outside_fill, device):
+        if outside_fill == "white":
+            values = [1.0, 1.0, 1.0]
+        elif outside_fill == "black" or outside_fill == "transparent_rgb_black":
+            values = [0.0, 0.0, 0.0]
+        else:
+            values = [0.5, 0.5, 0.5]
+        return torch.tensor(values, device=device, dtype=torch.float32).view(1, 1, 1, 3)
+
+    def isolate_crop(self, image, mask, resize_mode, target_width, target_height,
+                     mask_expand_percent, alpha_feather_percent, target_size_mode,
+                     target_aspect_ratio, outside_fill, downscale_algorithm,
+                     upscale_algorithm, device_mode, depad_florence=True,
+                     region_info="", edge_guard_percent=3.0,
+                     crop_padding_percent=8.0, visible_context_percent=10.0):
+        image = image.clone()
+        mask = mask.clone()
+
+        if device_mode == "gpu (much faster)":
+            device = comfy.model_management.get_torch_device()
+            image = image.to(device)
+            mask = mask.to(device)
+            processor = GPUProcessorLogic()
+        else:
+            device = torch.device("cpu")
+            processor = CPUProcessorLogic()
+
+        mask, image, mask_note = _normalize_mask_to_image(
+            mask, image, processor, "SmartObjectIsolateCrop",
+            depad_florence=depad_florence,
+        )
+        region_context = _extract_region_context(region_info)
+
+        result_stitcher = {
+            'downscale_algorithm': downscale_algorithm,
+            'upscale_algorithm': upscale_algorithm,
+            'canvas_to_orig_x': [],
+            'canvas_to_orig_y': [],
+            'canvas_to_orig_w': [],
+            'canvas_to_orig_h': [],
+            'canvas_image': [],
+            'cropped_to_canvas_x': [],
+            'cropped_to_canvas_y': [],
+            'cropped_to_canvas_w': [],
+            'cropped_to_canvas_h': [],
+            'cropped_mask_for_blend': [],
+            'device_mode': device_mode,
+        }
+        result_image = []
+        result_mask = []
+        result_mask_image = []
+        previews = []
+        preview_ui = []
+        infos = []
+
+        batch_size = image.shape[0]
+        for i in range(batch_size):
+            sub_image = image[i:i+1]
+            sub_mask = mask[i:i+1]
+            image_h = sub_image.shape[1]
+            image_w = sub_image.shape[2]
+
+            _, bx, by, bw, bh = processor.batched_findcontextarea_m(sub_mask)
+            if bx[0] == -1:
+                raise ValueError("mask is empty; Smart Object Isolate Crop requires a non-empty mask.")
+
+            cur_x = bx[0].item()
+            cur_y = by[0].item()
+            cur_w = bw[0].item()
+            cur_h = bh[0].item()
+
+            if crop_padding_percent > 0.0:
+                pad_x = int(round(cur_w * float(crop_padding_percent) / 100.0))
+                pad_y = int(round(cur_h * float(crop_padding_percent) / 100.0))
+                x2 = min(image_w, cur_x + cur_w + pad_x)
+                y2 = min(image_h, cur_y + cur_h + pad_y)
+                cur_x = max(0, cur_x - pad_x)
+                cur_y = max(0, cur_y - pad_y)
+                cur_w = max(1, x2 - cur_x)
+                cur_h = max(1, y2 - cur_y)
+
+            if target_size_mode == "max_for_aspect_ratio":
+                aspect_ratio_value, target_aspect_source = _resolve_aspect_ratio_value(
+                    target_aspect_ratio,
+                    region_context=region_context,
+                    image_size=(image_w, image_h),
+                    bbox=(cur_x, cur_y, cur_x + cur_w, cur_y + cur_h),
+                    fallback_size=(target_width, target_height),
+                )
+                target_width_effective, target_height_effective = _max_gpt_size_for_aspect_ratio(aspect_ratio_value)
+            else:
+                target_aspect_source = "manual_width_height"
+                target_width_effective, target_height_effective = _normalize_gpt_image_size(
+                    int(target_width),
+                    int(target_height),
+                )
+
+            target_ar = target_width_effective / max(1, target_height_effective)
+            rect_x, rect_y, rect_w, rect_h = _fit_aspect_rect_to_bbox(
+                cur_x, cur_y, cur_w, cur_h, image_w, image_h, target_ar
+            )
+
+            if resize_mode == "keep_local_size":
+                out_w = max(1, int(rect_w))
+                out_h = max(1, int(rect_h))
+                resize_output = False
+            elif resize_mode == "upscale_to_target_if_smaller":
+                out_w = int(target_width_effective)
+                out_h = int(target_height_effective)
+                resize_output = rect_w < out_w or rect_h < out_h
+            else:
+                out_w = int(target_width_effective)
+                out_h = int(target_height_effective)
+                resize_output = True
+
+            (canvas_image, cto_x, cto_y, cto_w, cto_h,
+             cropped_image, cropped_mask,
+             ctc_x, ctc_y, ctc_w, ctc_h) = processor.crop_magic_im(
+                sub_image, sub_mask,
+                rect_x, rect_y, rect_w, rect_h,
+                rect_w, rect_h,
+                0,
+                downscale_algorithm, upscale_algorithm,
+                resize_output=False)
+
+            if resize_output:
+                if out_w > ctc_w or out_h > ctc_h:
+                    cropped_image = processor.rescale_i(cropped_image, out_w, out_h, upscale_algorithm)
+                    cropped_mask = processor.rescale_m(cropped_mask, out_w, out_h, upscale_algorithm)
+                else:
+                    cropped_image = processor.rescale_i(cropped_image, out_w, out_h, downscale_algorithm)
+                    cropped_mask = processor.rescale_m(cropped_mask, out_w, out_h, downscale_algorithm)
+            else:
+                out_w = int(ctc_w)
+                out_h = int(ctc_h)
+
+            isolated_mask = _grow_and_feather_mask(
+                cropped_mask.squeeze(0),
+                float(mask_expand_percent),
+                float(alpha_feather_percent),
+            ).unsqueeze(0).clamp(0, 1)
+            edit_mask = isolated_mask.clone()
+
+            guard_percent = float(edge_guard_percent)
+            if guard_percent > 0.0:
+                guard_h_px = int(out_h * guard_percent / 100.0)
+                guard_w_px = int(out_w * guard_percent / 100.0)
+                guard = make_smoothstep_feather(
+                    out_h,
+                    out_w,
+                    guard_h_px,
+                    guard_w_px,
+                    cropped_image.device,
+                ).unsqueeze(0)
+                edit_mask = (edit_mask * guard).clamp(0, 1)
+
+            context_alpha = edit_mask
+            if visible_context_percent > 0.0:
+                context_mask = _grow_and_feather_mask(
+                    cropped_mask.squeeze(0),
+                    float(visible_context_percent),
+                    max(float(alpha_feather_percent), 1.0),
+                ).unsqueeze(0).clamp(0, 1)
+                context_alpha = torch.maximum(context_mask, edit_mask)
+
+            fill = self._fill_value(outside_fill, cropped_image.device)
+            alpha = context_alpha.unsqueeze(-1)
+            rgb = cropped_image[..., :3]
+            isolated_rgb = (rgb * alpha) + (fill * (1.0 - alpha))
+            isolated_rgba = torch.cat([isolated_rgb, alpha], dim=-1)
+
+            result_stitcher['canvas_to_orig_x'].append(cto_x)
+            result_stitcher['canvas_to_orig_y'].append(cto_y)
+            result_stitcher['canvas_to_orig_w'].append(cto_w)
+            result_stitcher['canvas_to_orig_h'].append(cto_h)
+            result_stitcher['canvas_image'].append(canvas_image.cpu())
+            result_stitcher['cropped_to_canvas_x'].append(ctc_x)
+            result_stitcher['cropped_to_canvas_y'].append(ctc_y)
+            result_stitcher['cropped_to_canvas_w'].append(ctc_w)
+            result_stitcher['cropped_to_canvas_h'].append(ctc_h)
+            result_stitcher['cropped_mask_for_blend'].append(edit_mask.cpu())
+            result_stitcher.setdefault('expected_edit_width', []).append(int(out_w))
+            result_stitcher.setdefault('expected_edit_height', []).append(int(out_h))
+
+            result_image.append(isolated_rgba.squeeze(0).cpu())
+            result_mask.append(edit_mask.squeeze(0).cpu())
+            mask_rgb = torch.stack([edit_mask.squeeze(0).cpu()] * 3, dim=-1)
+            result_mask_image.append(mask_rgb)
+
+            preview_tensor, temp_info = _make_nb2_preview(sub_image[0].cpu(), cur_y, cur_x, cur_h, cur_w)
+            previews.append(preview_tensor.squeeze(0))
+            if i == 0 and temp_info:
+                preview_ui.append(temp_info)
+
+            infos.append({
+                "mode": "isolated_object_detail",
+                "resize_mode": resize_mode,
+                "target_size_mode": target_size_mode,
+                "target_aspect_ratio": target_aspect_ratio,
+                "target_aspect_source": target_aspect_source,
+                "target_aspect_value": float(target_ar),
+                "target_width": int(out_w),
+                "target_height": int(out_h),
+                "recommended_gpt_size_mode": "auto_from_region",
+                "mask_expand_percent": float(mask_expand_percent),
+                "alpha_feather_percent": float(alpha_feather_percent),
+                "edge_guard_percent": float(edge_guard_percent),
+                "crop_padding_percent": float(crop_padding_percent),
+                "visible_context_percent": float(visible_context_percent),
+                "outside_fill": outside_fill,
+                "mask_bbox_x": int(cur_x),
+                "mask_bbox_y": int(cur_y),
+                "mask_bbox_w": int(cur_w),
+                "mask_bbox_h": int(cur_h),
+                "crop_canvas_x": int(ctc_x),
+                "crop_canvas_y": int(ctc_y),
+                "crop_canvas_w": int(ctc_w),
+                "crop_canvas_h": int(ctc_h),
+                "mask_note": mask_note,
+            })
+
+        result = {
+            "result": (
+                result_stitcher,
+                torch.stack(result_image, dim=0),
+                torch.stack(result_mask, dim=0),
+                torch.stack(result_mask_image, dim=0),
+                torch.stack(previews, dim=0),
+                json.dumps(infos[0] if len(infos) == 1 else {"batch_count": len(infos), "first": infos[0]}),
+            )
+        }
+        if preview_ui:
+            result["ui"] = {"nb2_preview": preview_ui}
+        return result
+
+
 class SmartMaskStitch:
     """
     Stitch a locally edited masked crop back into the original image.
@@ -2080,10 +2445,18 @@ class SmartMaskStitch:
                 resized_alpha = processor.rescale_m(alpha_m, ctc_w, ctc_h, downscale_algo)
             blend_mask = blend_mask * resized_alpha.clamp(0, 1)
 
-        blend_mask = blend_mask.unsqueeze(-1)
-
         canvas_crop_full = canvas_image[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w]
         canvas_crop_rgb = canvas_crop_full[..., :3]
+
+        # GPT-style editors often return RGB over a white/blank background even
+        # when the input was isolated.  If that RGB is blended with a soft matte,
+        # the white leaks into the edge as a halo.  Decontaminate weak-mask
+        # pixels by replacing them with the original canvas color before the
+        # final composite.
+        cleanup_mask = ((blend_mask - 0.12) / 0.55).clamp(0, 1).unsqueeze(-1)
+        resized_rgb = cleanup_mask * resized_rgb + (1.0 - cleanup_mask) * canvas_crop_rgb
+
+        blend_mask = blend_mask.unsqueeze(-1)
         blended_rgb = blend_mask * resized_rgb + (1.0 - blend_mask) * canvas_crop_rgb
 
         if canvas_image.shape[-1] == 4:
@@ -2099,6 +2472,125 @@ class SmartMaskStitch:
 # ===========================================================================
 #  NEW NODE 2 — InpaintCropNB2
 # ===========================================================================
+
+class SmartMaskMultiStitch:
+    """
+    Apply multiple independent Smart Mask stitchers onto one accumulated image.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "stitcher_1": ("STITCHER",),
+                "edited_image_1": ("IMAGE",),
+                "edge_feather_percent": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 50.0, "step": 0.1,
+                }),
+                "result_mask_feather_percent": ("FLOAT", {
+                    "default": 1.5, "min": 0.0, "max": 100.0, "step": 0.5,
+                }),
+            },
+            "optional": {
+                "stitcher_2": ("STITCHER",),
+                "edited_image_2": ("IMAGE",),
+                "stitcher_3": ("STITCHER",),
+                "edited_image_3": ("IMAGE",),
+                "stitcher_4": ("STITCHER",),
+                "edited_image_4": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "multi_stitch"
+    CATEGORY = "inpaint/masked"
+    DESCRIPTION = (
+        "Applies up to four local masked edits onto the same final image. "
+        "Use for independent garment calls such as top and bottom."
+    )
+
+    def _clone_stitcher_with_canvas(self, stitcher, current_image):
+        cloned = {}
+        for key, value in stitcher.items():
+            cloned[key] = list(value) if isinstance(value, list) else value
+
+        canvas_images = []
+        current = current_image.detach().cpu()
+        batch_size = current.shape[0]
+        source_canvases = stitcher.get('canvas_image') or []
+        for idx, canvas in enumerate(source_canvases):
+            new_canvas = canvas.clone()
+            image_idx = idx if idx < batch_size else 0
+            cto_x = int(stitcher['canvas_to_orig_x'][idx])
+            cto_y = int(stitcher['canvas_to_orig_y'][idx])
+            cto_w = int(stitcher['canvas_to_orig_w'][idx])
+            cto_h = int(stitcher['canvas_to_orig_h'][idx])
+            replacement = current[image_idx:image_idx + 1, :, :, :3]
+            if replacement.shape[1] != cto_h or replacement.shape[2] != cto_w:
+                replacement = comfy.utils.common_upscale(
+                    replacement.movedim(-1, 1),
+                    cto_w,
+                    cto_h,
+                    "bilinear",
+                    "disabled",
+                ).movedim(1, -1)
+            if new_canvas.shape[-1] == 4:
+                existing_alpha = new_canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w, 3:4]
+                new_canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w] = torch.cat(
+                    [replacement, existing_alpha],
+                    dim=-1,
+                )
+            else:
+                new_canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w] = replacement
+            canvas_images.append(new_canvas)
+
+        cloned['canvas_image'] = canvas_images
+        return cloned
+
+    def _apply_one(self, base_image, stitcher, edited_image,
+                   edge_feather_percent, result_mask_feather_percent,
+                   use_base_canvas):
+        active_stitcher = self._clone_stitcher_with_canvas(stitcher, base_image) if use_base_canvas else stitcher
+        return SmartMaskStitch().smart_mask_stitch(
+            active_stitcher,
+            edited_image,
+            edge_feather_percent,
+            result_mask_feather_percent,
+        )[0]
+
+    def multi_stitch(self, stitcher_1, edited_image_1, edge_feather_percent,
+                     result_mask_feather_percent, stitcher_2=None,
+                     edited_image_2=None, stitcher_3=None, edited_image_3=None,
+                     stitcher_4=None, edited_image_4=None):
+        result = self._apply_one(
+            edited_image_1,
+            stitcher_1,
+            edited_image_1,
+            edge_feather_percent,
+            result_mask_feather_percent,
+            use_base_canvas=False,
+        )
+
+        pairs = [
+            (stitcher_2, edited_image_2),
+            (stitcher_3, edited_image_3),
+            (stitcher_4, edited_image_4),
+        ]
+        for stitcher, edited_image in pairs:
+            if stitcher is None or edited_image is None:
+                continue
+            result = self._apply_one(
+                result,
+                stitcher,
+                edited_image,
+                edge_feather_percent,
+                result_mask_feather_percent,
+                use_base_canvas=True,
+            )
+
+        return (result,)
+
 
 class InpaintCropNB2:
     """
@@ -3194,6 +3686,303 @@ class NB2Florence2RegionSelector:
             raise RuntimeError(f"Florence region selection failed: {error_summary}") from e
 
 
+class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
+    """
+    Select semantic regions through FAL's SAM 3 image endpoint.
+
+    Outputs intentionally match NB2Florence2RegionSelector so the same crop,
+    stitch, and local edit nodes can be reused without graph changes.
+    """
+
+    SELECTION_MODE_OPTIONS = ["largest", "first", "merge_all"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "prompt": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "garment",
+                        "placeholder": "Text prompt, e.g. bra, pants, glasses, wheel",
+                    },
+                ),
+            },
+            "optional": {
+                "selection_mode": (cls.SELECTION_MODE_OPTIONS, {"default": "largest"}),
+                "padding_percent": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
+                "return_rect_mask": ("BOOLEAN", {"default": False}),
+                "api_key": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Optional. Leave blank to use FAL_KEY",
+                    },
+                ),
+                "api_key_env_var": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "FAL_KEY",
+                        "placeholder": "Environment variable fallback",
+                    },
+                ),
+                "mask_blur_percent": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "tooltip": "Soft blur applied to the returned SAM mask.",
+                    },
+                ),
+                "upload_max_dimension": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 512,
+                        "max": 4096,
+                        "step": 64,
+                    },
+                ),
+                "return_multiple_masks": ("BOOLEAN", {"default": True}),
+                "max_masks": ("INT", {"default": 3, "min": 1, "max": 32, "step": 1}),
+                "include_scores": ("BOOLEAN", {"default": True}),
+                "include_boxes": ("BOOLEAN", {"default": True}),
+                "point_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x\": 100, \"y\": 120, \"label\": 1}]",
+                    },
+                ),
+                "box_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x_min\": 10, \"y_min\": 20, \"x_max\": 300, \"y_max\": 400}]",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "IMAGE", "STRING", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "mask",
+        "mask_image",
+        "info",
+        "center_x",
+        "center_y",
+        "crop_width",
+        "crop_height",
+    )
+    FUNCTION = "segment_image"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Selects a region using FAL SAM 3 image segmentation. "
+        "API key can be provided by input or FAL_KEY environment variable."
+    )
+
+    def _parse_prompt_list(self, value, label):
+        text = _coerce_text_value(value)
+        if not text:
+            return []
+        data = _safe_json_loads(text)
+        if not isinstance(data, list):
+            raise ValueError(f"{label} must be a JSON list.")
+        return data
+
+    def _download_mask_image(self, image_ref):
+        url = ""
+        if isinstance(image_ref, dict):
+            url = _coerce_text_value(image_ref.get("url"))
+        elif isinstance(image_ref, str):
+            url = _coerce_text_value(image_ref)
+        if not url:
+            raise RuntimeError("SAM 3 returned a mask without a URL.")
+
+        if url.startswith("data:"):
+            header, _, payload = url.partition(",")
+            if ";base64" not in header:
+                raise RuntimeError("Unsupported SAM 3 data URI mask payload.")
+            import base64
+            content = base64.b64decode(payload)
+        else:
+            response = requests.get(url, timeout=300)
+            response.raise_for_status()
+            content = response.content
+
+        pil_image = Image.open(io.BytesIO(content))
+        pil_image.load()
+        if pil_image.mode == "RGBA":
+            alpha = np.asarray(pil_image.getchannel("A"), dtype=np.uint8)
+            rgb = np.asarray(pil_image.convert("RGB"), dtype=np.uint8)
+            gray = np.maximum(np.max(rgb, axis=-1), alpha)
+        else:
+            gray = np.asarray(pil_image.convert("L"), dtype=np.uint8)
+        return gray
+
+    def _select_mask(self, masks_uint8, selection_mode):
+        if not masks_uint8:
+            raise RuntimeError("SAM 3 returned no usable masks.")
+        if selection_mode == "merge_all":
+            merged = np.zeros_like(masks_uint8[0], dtype=np.uint8)
+            for mask in masks_uint8:
+                merged = np.maximum(merged, mask)
+            return merged, "merge_all", len(masks_uint8)
+        if selection_mode == "first":
+            return masks_uint8[0], "first", len(masks_uint8)
+        return max(masks_uint8, key=lambda m: int(np.count_nonzero(m > 0))), "largest", len(masks_uint8)
+
+    def segment_image(
+        self,
+        image,
+        prompt,
+        selection_mode="largest",
+        padding_percent=0.0,
+        return_rect_mask=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+        mask_blur_percent=0.0,
+        upload_max_dimension=2048,
+        return_multiple_masks=True,
+        max_masks=3,
+        include_scores=True,
+        include_boxes=True,
+        point_prompts_json="",
+        box_prompts_json="",
+    ):
+        try:
+            if not isinstance(image, torch.Tensor):
+                raise ValueError("image input must be a ComfyUI IMAGE tensor.")
+            if image.ndim != 4:
+                raise ValueError(
+                    f"Expected IMAGE tensor with shape [B,H,W,C], got {tuple(image.shape)}."
+                )
+            if image.shape[0] != 1:
+                raise ValueError("NB2SAM3ImageSegmenter currently supports batch size 1 only.")
+
+            resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
+            image_url, original_size, uploaded_size = self._upload_image(
+                image,
+                resolved_api_key,
+                max_dimension=int(upload_max_dimension),
+            )
+            image_np = self._normalize_image_array(image[0:1])
+            height, width = image_np.shape[:2]
+            point_prompts = self._parse_prompt_list(point_prompts_json, "point_prompts_json")
+            box_prompts = self._parse_prompt_list(box_prompts_json, "box_prompts_json")
+
+            arguments = {
+                "image_url": image_url,
+                "prompt": _coerce_text_value(prompt),
+                "point_prompts": point_prompts,
+                "box_prompts": box_prompts,
+                "apply_mask": False,
+                "output_format": "png",
+                "return_multiple_masks": bool(return_multiple_masks),
+                "max_masks": int(max_masks),
+                "include_scores": bool(include_scores),
+                "include_boxes": bool(include_boxes),
+            }
+            result = self._call_api("fal-ai/sam-3/image", arguments, resolved_api_key)
+            mask_entries = result.get("masks") if isinstance(result, dict) else None
+            if not mask_entries:
+                primary = result.get("image") if isinstance(result, dict) else None
+                mask_entries = [primary] if primary else []
+
+            masks_uint8 = []
+            mask_sizes = []
+            for entry in mask_entries:
+                mask_uint8 = self._download_mask_image(entry)
+                mask_sizes.append({"width": int(mask_uint8.shape[1]), "height": int(mask_uint8.shape[0])})
+                if mask_uint8.shape[:2] != (height, width):
+                    pil_mask = Image.fromarray(mask_uint8, mode="L")
+                    pil_mask = pil_mask.resize((width, height), Image.BILINEAR)
+                    mask_uint8 = np.asarray(pil_mask, dtype=np.uint8)
+                masks_uint8.append(mask_uint8)
+
+            selected_mask, selected_source, returned_mask_count = self._select_mask(
+                masks_uint8,
+                selection_mode,
+            )
+            selected_mask = np.where(selected_mask > 0, 255, 0).astype(np.uint8)
+            bbox = self._mask_bbox(selected_mask)
+            padded_bbox = self._apply_padding(bbox, width, height, padding_percent)
+
+            if return_rect_mask:
+                output_mask_uint8 = self._rect_mask_from_bbox(width, height, padded_bbox)
+            else:
+                output_mask_uint8 = selected_mask.copy()
+            if mask_blur_percent > 0.0:
+                output_mask_uint8 = _blur_uint8_mask(output_mask_uint8, mask_blur_percent)
+
+            center_x = int(round((padded_bbox[0] + padded_bbox[2]) / 2.0))
+            center_y = int(round((padded_bbox[1] + padded_bbox[3]) / 2.0))
+            crop_width = int(padded_bbox[2] - padded_bbox[0])
+            crop_height = int(padded_bbox[3] - padded_bbox[1])
+
+            mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
+            region_type = "object"
+            recommended_aspect_ratio = _recommend_aspect_ratio_for_region(region_type, padded_bbox)
+            region_edit_hints = _get_region_edit_hints(region_type)
+            metadata = result.get("metadata") if isinstance(result, dict) else None
+            info = {
+                "region_type": region_type,
+                "query": _coerce_text_value(prompt),
+                "source": "fal-ai/sam-3/image",
+                "selection_mode": selection_mode,
+                "selected_mask_source": selected_source,
+                "returned_mask_count": int(returned_mask_count),
+                "padding_percent": float(padding_percent),
+                "mask_blur_percent": float(mask_blur_percent),
+                "upload_max_dimension": int(upload_max_dimension),
+                "api_key_source": api_key_source,
+                "recommended_aspect_ratio": recommended_aspect_ratio,
+                "recommended_edit_size": _recommend_edit_size_for_aspect_ratio(recommended_aspect_ratio),
+                "recommended_mask_expand_percent": float(region_edit_hints["mask_expand_percent"]),
+                "recommended_mask_feather_percent": float(region_edit_hints["mask_feather_percent"]),
+                "recommended_context_expand": float(region_edit_hints["context_expand"]),
+                "original_size": {"width": int(original_size[0]), "height": int(original_size[1])},
+                "uploaded_size": {"width": int(uploaded_size[0]), "height": int(uploaded_size[1])},
+                "mask_sizes": mask_sizes,
+                "metadata": metadata,
+                "bbox": {
+                    "x1": int(padded_bbox[0]),
+                    "y1": int(padded_bbox[1]),
+                    "x2": int(padded_bbox[2]),
+                    "y2": int(padded_bbox[3]),
+                },
+                "center_x": center_x,
+                "center_y": center_y,
+                "crop_width": crop_width,
+                "crop_height": crop_height,
+            }
+
+            return (
+                mask_tensor,
+                mask_image_tensor,
+                json.dumps(info),
+                center_x,
+                center_y,
+                crop_width,
+                crop_height,
+            )
+        except Exception as e:
+            error_summary = _summarize_remote_error(e)
+            logger.error("SAM 3 image segmentation failed: %s", error_summary)
+            raise RuntimeError(f"SAM 3 image segmentation failed: {error_summary}") from e
+
+
 class NB2OpenAIImageEdit:
     """
     Edit an image with GPT Image 2 through FAL using an optional mask.
@@ -3343,8 +4132,33 @@ class NB2OpenAIImageEdit:
         except ValueError:
             return "", "none"
 
+    def _normalize_image_array_preserve_alpha(self, image):
+        if isinstance(image, torch.Tensor):
+            image_np = image.detach().cpu().numpy()
+        else:
+            image_np = np.asarray(image)
+
+        if image_np.ndim == 4 and image_np.shape[0] == 1:
+            image_np = image_np[0]
+        elif image_np.ndim == 3 and image_np.shape[0] in (3, 4):
+            image_np = np.transpose(image_np, (1, 2, 0))
+
+        if image_np.dtype != np.uint8:
+            if image_np.max() <= 1.0:
+                image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+            else:
+                image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+
+        if image_np.ndim == 2:
+            image_np = np.stack([image_np] * 3, axis=-1)
+
+        if image_np.shape[-1] > 4:
+            image_np = image_np[..., :4]
+
+        return image_np
+
     def _image_tensor_to_png_bytes(self, image_tensor):
-        image_np = NB2Florence2RegionSelector()._normalize_image_array(image_tensor)
+        image_np = self._normalize_image_array_preserve_alpha(image_tensor)
         mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
         image = Image.fromarray(image_np[..., :4] if mode == "RGBA" else image_np[..., :3], mode=mode)
         buf = io.BytesIO()
@@ -3953,6 +4767,198 @@ class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
             raise RuntimeError(f"Nano Banana 2 edit failed: {error_summary}") from e
 
 
+class NB2Seedream45Edit(NB2OpenAIImageEdit):
+    """
+    Edit images with ByteDance Seedream 4.5 through FAL.
+
+    Seedream 4.5 does not accept an explicit mask. For local masked workflows,
+    feed it the isolated/context crop and let SmartMaskStitch paste the result
+    back using the original stored mask.
+    """
+
+    IMAGE_SIZE_MODE_OPTIONS = ["auto_2K", "auto_4K", "custom", "auto_from_region"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": (
+                        "Enhance only the visible garment area in Image 1. "
+                        "Use reference images only for garment detail. Preserve "
+                        "the crop, pose, skin, background, and visible cut-off edges."
+                    ),
+                }),
+                "image_1": ("IMAGE",),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "Optional. Leave blank to use FAL_KEY",
+                }),
+                "api_key_env_var": ("STRING", {
+                    "multiline": False,
+                    "default": "FAL_KEY",
+                    "placeholder": "FAL environment variable fallback",
+                }),
+            },
+            "optional": {
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
+                "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",),
+                "image_7": ("IMAGE",),
+                "image_8": ("IMAGE",),
+                "image_9": ("IMAGE",),
+                "image_10": ("IMAGE",),
+                "region_info": ("STRING",),
+                "image_size_mode": (cls.IMAGE_SIZE_MODE_OPTIONS, {"default": "auto_from_region"}),
+                "width": ("INT", {"default": 2048, "min": 1920, "max": 4096, "step": 16}),
+                "height": ("INT", {"default": 2048, "min": 1920, "max": 4096, "step": 16}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "max_images": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "enable_safety_checker": ("BOOLEAN", {"default": True}),
+                "sync_mode": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "info")
+    FUNCTION = "edit_image"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Edits images through FAL's fal-ai/bytedance/seedream/v4.5/edit endpoint. "
+        "No mask input; pair with Smart Object Isolate Crop and Smart Mask Stitch."
+    )
+
+    def _format_seedream_image_size(self, image_size_mode, region_info, width, height):
+        if image_size_mode in ("auto_2K", "auto_4K"):
+            return image_size_mode, image_size_mode
+        if image_size_mode == "auto_from_region":
+            region_context = _extract_region_context(region_info)
+            target_w = int(region_context.get("target_width", 0) or 0)
+            target_h = int(region_context.get("target_height", 0) or 0)
+            if target_w > 0 and target_h > 0:
+                width = target_w
+                height = target_h
+            source = "smart_object_isolate_info" if target_w > 0 and target_h > 0 else "manual_fallback"
+        else:
+            source = "custom"
+
+        width, height = _normalize_seedream_image_size(width, height)
+        return {"width": int(width), "height": int(height)}, source
+
+    def edit_image(
+        self,
+        prompt,
+        image_1,
+        api_key,
+        api_key_env_var,
+        image_2=None,
+        image_3=None,
+        image_4=None,
+        image_5=None,
+        image_6=None,
+        image_7=None,
+        image_8=None,
+        image_9=None,
+        image_10=None,
+        region_info="",
+        image_size_mode="auto_from_region",
+        width=2048,
+        height=2048,
+        num_images=1,
+        max_images=1,
+        seed=-1,
+        enable_safety_checker=True,
+        sync_mode=False,
+    ):
+        try:
+            fal_api_key, fal_api_key_source = self._resolve_api_key(
+                api_key,
+                api_key_env_var,
+                self._looks_like_fal_api_key,
+                "FAL_KEY",
+                "FAL",
+            )
+
+            input_images = [
+                image_1, image_2, image_3, image_4, image_5,
+                image_6, image_7, image_8, image_9, image_10,
+            ]
+            image_urls = []
+            input_size = None
+            for index, input_image in enumerate(input_images, start=1):
+                if input_image is None:
+                    continue
+                image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
+                if index == 1:
+                    input_size = current_size
+                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            if not image_urls:
+                raise ValueError("image_1 is required.")
+
+            image_size, size_source = self._format_seedream_image_size(
+                image_size_mode,
+                region_info,
+                width,
+                height,
+            )
+
+            arguments = {
+                "prompt": _coerce_text_value(prompt),
+                "image_urls": image_urls[-10:],
+                "image_size": image_size,
+                "num_images": int(num_images),
+                "max_images": int(max_images),
+                "enable_safety_checker": bool(enable_safety_checker),
+                "sync_mode": bool(sync_mode),
+            }
+            if seed != -1:
+                arguments["seed"] = int(seed)
+
+            result = self._call_fal("fal-ai/bytedance/seedream/v4.5/edit", arguments, fal_api_key)
+            image_urls_out = NB2NanoBanana2Edit()._extract_result_image_urls(result)
+            if not image_urls_out:
+                raise RuntimeError("FAL Seedream 4.5 edit returned no output image URL.")
+
+            output_images = [self._decode_image_result(url) for url in image_urls_out]
+            first_shape = output_images[0].shape
+            if all(image.shape == first_shape for image in output_images):
+                output_batch = torch.cat(output_images, dim=0)
+            else:
+                output_batch = output_images[0]
+
+            info = {
+                "endpoint": "fal-ai/bytedance/seedream/v4.5/edit",
+                "image_size_mode": image_size_mode,
+                "image_size_sent": image_size,
+                "size_source": size_source,
+                "num_images": int(num_images),
+                "max_images": int(max_images),
+                "input_width": int(input_size[0]) if input_size else None,
+                "input_height": int(input_size[1]) if input_size else None,
+                "output_width": int(output_batch.shape[2]),
+                "output_height": int(output_batch.shape[1]),
+                "input_image_count": len(image_urls),
+                "output_image_count": len(image_urls_out),
+                "fal_api_key_source": fal_api_key_source,
+                "enable_safety_checker": bool(enable_safety_checker),
+                "sync_mode": bool(sync_mode),
+                "output_image_urls": image_urls_out,
+            }
+            if output_batch.shape[0] != len(image_urls_out):
+                info["warning"] = "Output images had different sizes; returned only the first image."
+
+            return (output_batch.cpu(), json.dumps(info))
+        except Exception as e:
+            error_summary = _summarize_remote_error(e)
+            logger.error("Seedream 4.5 edit failed: %s", error_summary)
+            raise RuntimeError(f"Seedream 4.5 edit failed: {error_summary}") from e
+
+
 # ===========================================================================
 #  ComfyUI registration
 # ===========================================================================
@@ -3961,13 +4967,17 @@ NODE_CLASS_MAPPINGS = {
     "NanoBanana2MaskGen":  NanoBanana2MaskGen,
     "NB2SmartRegionMask":  NB2SmartRegionMask,
     "SmartMaskCrop":       SmartMaskCrop,
+    "SmartObjectIsolateCrop": SmartObjectIsolateCrop,
     "SmartMaskStitch":     SmartMaskStitch,
+    "SmartMaskMultiStitch": SmartMaskMultiStitch,
     "InpaintCropNB2":      InpaintCropNB2,
     "InpaintStitchNB2":    InpaintStitchNB2,
     "NB2AddAlpha":         NB2AddAlpha,
     "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
+    "NB2SAM3ImageSegmenter": NB2SAM3ImageSegmenter,
     "NB2OpenAIImageEdit": NB2OpenAIImageEdit,
     "NB2NanoBanana2Edit": NB2NanoBanana2Edit,
+    "NB2Seedream45Edit": NB2Seedream45Edit,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3979,6 +4989,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintStitchNB2":    "✂️ NB2 Stitch",
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
     "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
+    "NB2SAM3ImageSegmenter": "SAM 3 Image Segmenter (FAL API)",
+    "SmartObjectIsolateCrop": "Smart Object Isolate Crop",
+    "SmartMaskMultiStitch": "Smart Mask Multi Stitch",
     "NB2OpenAIImageEdit": "OpenAI GPT Image Edit",
     "NB2NanoBanana2Edit": "Nano Banana 2 Edit (FAL API)",
+    "NB2Seedream45Edit": "Seedream 4.5 Edit (FAL API)",
 }
