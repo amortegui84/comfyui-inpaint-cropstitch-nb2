@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 .DS_Store
 EL_Workflow.json
+workflow-new.json
+workflow-new-*-api.json

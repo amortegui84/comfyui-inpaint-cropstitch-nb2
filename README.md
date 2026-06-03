@@ -74,7 +74,7 @@ Built-in region defaults: `glasses -> 16:9`, `face -> 1:1`, `upper_body -> 1:1`,
 Security notes:
 
 - The repo does not store any API key.
-- All bundled workflows leave `api_key` empty.
+- Bundled visual workflows leave `api_key` empty. API prompt examples use `__FAL_KEY__` as a placeholder that you must replace before posting to `/prompt`.
 - For safer usage, prefer setting `FAL_KEY` in the environment and keep `api_key` blank.
 - If you paste a key into the node and save the workflow yourself, ComfyUI may persist that widget value into the workflow JSON.
 
@@ -116,6 +116,22 @@ For two independent garment passes:
 SAM 3 "bra"   -> Smart Object Isolate Crop -> Seedream 4.5 Edit \
 SAM 3 "pants" -> Smart Object Isolate Crop -> Seedream 4.5 Edit  -> Smart Mask Multi Stitch -> final image
 ```
+
+---
+
+### SAM 3 Smart Region Selector (FAL API)
+
+Preset-driven SAM 3 selector with the same output contract as Florence. Use this when you want dropdown presets for common targets while keeping `object` available for custom text.
+
+| Input | Type | Description |
+|---|---|---|
+| image | IMAGE | Source image to segment |
+| region_type | choice | `face`, `upper_body`, `lower_body`, `full_body`, garments such as `bra`/`pants`, accessories, `car`, `vehicle`, `wheel`, or `object` |
+| custom_text | STRING | Required only when `region_type = object` |
+| api_key | STRING | Optional direct FAL API key. Leave blank if using an env var |
+| api_key_env_var | STRING | Env var fallback, default `FAL_KEY` |
+
+For SAM masks, set downstream `depad_florence = false`. Keep `depad_florence = true` only for Florence-style masks that need letterbox correction.
 
 ---
 
@@ -438,13 +454,17 @@ NB2Florence2RegionSelector or Florence2Run (kijai)
 | `06_florence_garment_detail_gpt_image2_multistitch.json` | Florence-2 top/bottom garment selectors -> isolated GPT Image 2 detail passes -> Smart Mask Multi Stitch |
 | `07_florence_garment_detail_seedream45_multistitch.json` | Florence-2 top/bottom garment selectors -> isolated Seedream 4.5 detail passes -> Smart Mask Multi Stitch |
 | `08_sam3_garment_detail_seedream45_multistitch.json` | SAM 3 top/bottom garment selectors -> isolated Seedream 4.5 detail passes -> Smart Mask Multi Stitch |
+| `09_sam3_smart_region_seedream45_multistitch_api.json` | API prompt using SAM 3 Smart Region selectors for top/bottom garment Seedream 4.5 passes |
+| `10_florence_seedream45_multistitch_api.json` | API prompt using Florence object selectors for the same top/bottom Seedream 4.5 pass |
 
-Load any `.json` via **ComfyUI -> Load** (drag & drop or File > Open).
+Load visual workflow `.json` files via **ComfyUI -> Load** (drag & drop or File > Open). Files ending in `_api.json` are ComfyUI API prompt payloads for `/prompt`; replace `__FAL_KEY__` first or leave `api_key` blank and provide `FAL_KEY` in the ComfyUI process environment.
 
 Recommended starting points:
 
 - Use `08_sam3_garment_detail_seedream45_multistitch.json` for the newest garment-detail workflow.
+- Use `09_sam3_smart_region_seedream45_multistitch_api.json` when submitting the same garment-detail flow through the ComfyUI API.
 - Use `07_florence_garment_detail_seedream45_multistitch.json` if Florence-2 selects the object better on a specific image.
+- Use `10_florence_seedream45_multistitch_api.json` when submitting the Florence version through the ComfyUI API.
 - Use `06_florence_garment_detail_gpt_image2_multistitch.json` when the editor must receive an explicit mask.
 - Use `00_manual_nb2_crop_stitch_nano_banana2.json` for manual NB2 crop/stitch tests.
 
@@ -530,6 +550,14 @@ git lfs pull
 **Cause:** ComfyUI portable ships with its own embedded Python interpreter. Packages installed against system Python are invisible to it. A plain `pip install fal-client` from a normal terminal does nothing for ComfyUI portable.
 
 **Fix:** Use the embedded Python executable directly (see the Windows Portable section above). Fully close and reopen ComfyUI after installing — a browser refresh alone is not enough.
+
+---
+
+### `401 Unauthorized` from `storage/auth/token`
+
+**Cause:** FAL rejected the upload-token request before the Florence or edit model ran. This means the ComfyUI process is not receiving a valid FAL key, or the key was pasted into the wrong field.
+
+**Fix:** Paste your FAL key directly into each FAL node's `api_key` input for a quick test, or set `FAL_KEY` before launching ComfyUI and fully restart it. The key should look like `<key_id>:<key_secret>` or a valid `fal_...` key. Keep `api_key_env_var` as `FAL_KEY` unless you intentionally use a different environment variable name.
 
 ---
 

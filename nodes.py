@@ -89,6 +89,19 @@ REGION_ASPECT_RATIO_HINTS = {
     "upper_body": "1:1",
     "lower_body": "1:1",
     "full_body": "9:16",
+    "hair": "1:1",
+    "hat": "1:1",
+    "shirt": "1:1",
+    "top": "1:1",
+    "bra": "1:1",
+    "pants": "1:1",
+    "skirt": "1:1",
+    "dress": "9:16",
+    "shoes": "16:9",
+    "bag": "1:1",
+    "car": "16:9",
+    "vehicle": "16:9",
+    "wheel": "1:1",
 }
 
 REGION_EDIT_HINTS = {
@@ -123,6 +136,20 @@ REGION_EDIT_HINTS = {
     "full_body": {
         "aspect_ratio": "9:16",
         "edit_size": "1536x2752",
+        "mask_expand_percent": 6.0,
+        "mask_feather_percent": 4.0,
+        "context_expand": 1.08,
+    },
+    "car": {
+        "aspect_ratio": "16:9",
+        "edit_size": "2752x1536",
+        "mask_expand_percent": 6.0,
+        "mask_feather_percent": 4.0,
+        "context_expand": 1.08,
+    },
+    "vehicle": {
+        "aspect_ratio": "16:9",
+        "edit_size": "2752x1536",
         "mask_expand_percent": 6.0,
         "mask_feather_percent": 4.0,
         "context_expand": 1.08,
@@ -166,6 +193,20 @@ def _coerce_text_value(value):
 def _summarize_remote_error(error):
     text = str(error).strip()
     lower = text.lower()
+    if ("401 unauthorized" in lower or "403 forbidden" in lower) and "storage/auth/token" in lower:
+        return (
+            "FAL rejected the storage upload token request as unauthorized. "
+            "Check that the Florence node is using a valid FAL API key in the "
+            "format <key_id>:<key_secret>, that the key has API scope, and that "
+            "ComfyUI was fully restarted after changing FAL_KEY. For a quick "
+            "test, paste the FAL key directly into the node's api_key input."
+        )
+    if "401 unauthorized" in lower or "403 forbidden" in lower:
+        return (
+            "FAL rejected the request as unauthorized. Check that the node is "
+            "using a valid FAL API key in the format <key_id>:<key_secret> and "
+            "that the key has API scope."
+        )
     if "<html" in lower and "internal server error" in lower:
         return (
             "Remote server returned 500 Internal Server Error. "
@@ -3115,14 +3156,26 @@ class NB2Florence2RegionSelector:
     def _resolve_api_key(self, api_key, api_key_env_var):
         direct_key = self._coerce_text(api_key)
         if direct_key:
-            if self._looks_like_env_var_name(direct_key) and not self._looks_like_api_key(direct_key):
+            if self._looks_like_api_key(direct_key):
+                return direct_key, "direct_input"
+            if self._looks_like_env_var_name(direct_key):
                 env_key = os.getenv(direct_key, "").strip()
                 if env_key:
+                    if not self._looks_like_api_key(env_key):
+                        raise ValueError(
+                            f"Environment variable {direct_key} is set but does not look like a valid FAL API key."
+                        )
                     logger.warning(
                         "Florence node received an environment variable name in api_key; resolving it from the environment."
                     )
                     return env_key, f"environment:{direct_key}"
-            return direct_key, "direct_input"
+                raise ValueError(
+                    f"api_key contains the environment variable name {direct_key}, but that variable is not set. "
+                    f"Paste the actual FAL key into api_key or put {direct_key} in api_key_env_var."
+                )
+            raise ValueError(
+                "api_key does not look like a valid FAL API key. Expected <key_id>:<key_secret> or fal_..."
+            )
 
         env_name = self._coerce_text(api_key_env_var) or "FAL_KEY"
 
@@ -3143,6 +3196,10 @@ class NB2Florence2RegionSelector:
 
         env_key = os.getenv(env_name, "").strip()
         if env_key:
+            if not self._looks_like_api_key(env_key):
+                raise ValueError(
+                    f"Environment variable {env_name} is set but does not look like a valid FAL API key."
+                )
             return env_key, f"environment:{env_name}"
 
         raise ValueError(
@@ -3860,6 +3917,7 @@ class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
         include_boxes=True,
         point_prompts_json="",
         box_prompts_json="",
+        region_type="object",
     ):
         try:
             if not isinstance(image, torch.Tensor):
@@ -3932,7 +3990,7 @@ class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
             crop_height = int(padded_bbox[3] - padded_bbox[1])
 
             mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
-            region_type = "object"
+            region_type = _coerce_text_value(region_type) or "object"
             recommended_aspect_ratio = _recommend_aspect_ratio_for_region(region_type, padded_bbox)
             region_edit_hints = _get_region_edit_hints(region_type)
             metadata = result.get("metadata") if isinstance(result, dict) else None
@@ -3981,6 +4039,189 @@ class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
             error_summary = _summarize_remote_error(e)
             logger.error("SAM 3 image segmentation failed: %s", error_summary)
             raise RuntimeError(f"SAM 3 image segmentation failed: {error_summary}") from e
+
+
+class NB2SAM3SmartRegionSelector(NB2SAM3ImageSegmenter):
+    """
+    SAM 3 selector with the same preset-driven UX as the Florence selector.
+
+    Use `object` when you want to provide an arbitrary text prompt. The outputs
+    intentionally match Florence and the free-prompt SAM node.
+    """
+
+    REGION_TYPE_OPTIONS = [
+        "face",
+        "upper_body",
+        "lower_body",
+        "full_body",
+        "hair",
+        "glasses",
+        "hat",
+        "shirt",
+        "top",
+        "bra",
+        "pants",
+        "skirt",
+        "dress",
+        "shoes",
+        "bag",
+        "car",
+        "vehicle",
+        "wheel",
+        "object",
+    ]
+    REGION_QUERY_MAP = {
+        "face": "face",
+        "upper_body": "upper body",
+        "lower_body": "lower body",
+        "full_body": "full body person",
+        "hair": "hair",
+        "glasses": "glasses",
+        "hat": "hat",
+        "shirt": "shirt",
+        "top": "top garment",
+        "bra": "bra",
+        "pants": "pants",
+        "skirt": "skirt",
+        "dress": "dress",
+        "shoes": "shoes",
+        "bag": "bag",
+        "car": "car",
+        "vehicle": "vehicle",
+        "wheel": "wheel",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "region_type": (cls.REGION_TYPE_OPTIONS, {"default": "object"}),
+            },
+            "optional": {
+                "custom_text": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Required when region_type is object",
+                    },
+                ),
+                "selection_mode": (cls.SELECTION_MODE_OPTIONS, {"default": "largest"}),
+                "padding_percent": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
+                "return_rect_mask": ("BOOLEAN", {"default": False}),
+                "api_key": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Optional. Leave blank to use FAL_KEY",
+                    },
+                ),
+                "api_key_env_var": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "FAL_KEY",
+                        "placeholder": "Environment variable fallback",
+                    },
+                ),
+                "mask_blur_percent": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "tooltip": "Soft blur applied to the returned SAM mask.",
+                    },
+                ),
+                "upload_max_dimension": (
+                    "INT",
+                    {"default": 2048, "min": 512, "max": 4096, "step": 64},
+                ),
+                "return_multiple_masks": ("BOOLEAN", {"default": True}),
+                "max_masks": ("INT", {"default": 3, "min": 1, "max": 32, "step": 1}),
+                "include_scores": ("BOOLEAN", {"default": True}),
+                "include_boxes": ("BOOLEAN", {"default": True}),
+                "point_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x\": 100, \"y\": 120, \"label\": 1}]",
+                    },
+                ),
+                "box_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x_min\": 10, \"y_min\": 20, \"x_max\": 300, \"y_max\": 400}]",
+                    },
+                ),
+            },
+        }
+
+    FUNCTION = "select_region"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Select one semantic region using SAM 3 through FAL. Includes body, "
+        "garment, vehicle, and object/custom presets."
+    )
+
+    def _build_sam_query(self, region_type, custom_text):
+        region_type = _coerce_text_value(region_type) or "object"
+        custom_text = _coerce_text_value(custom_text)
+        if region_type == "object":
+            if not custom_text:
+                raise ValueError("custom_text is required when region_type is object.")
+            return custom_text
+        if custom_text:
+            raise ValueError("custom_text can only be used when region_type is object.")
+        return self.REGION_QUERY_MAP[region_type]
+
+    def select_region(
+        self,
+        image,
+        region_type,
+        custom_text="",
+        selection_mode="largest",
+        padding_percent=0.0,
+        return_rect_mask=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+        mask_blur_percent=0.0,
+        upload_max_dimension=2048,
+        return_multiple_masks=True,
+        max_masks=3,
+        include_scores=True,
+        include_boxes=True,
+        point_prompts_json="",
+        box_prompts_json="",
+    ):
+        prompt = self._build_sam_query(region_type, custom_text)
+        return self.segment_image(
+            image=image,
+            prompt=prompt,
+            selection_mode=selection_mode,
+            padding_percent=padding_percent,
+            return_rect_mask=return_rect_mask,
+            api_key=api_key,
+            api_key_env_var=api_key_env_var,
+            mask_blur_percent=mask_blur_percent,
+            upload_max_dimension=upload_max_dimension,
+            return_multiple_masks=return_multiple_masks,
+            max_masks=max_masks,
+            include_scores=include_scores,
+            include_boxes=include_boxes,
+            point_prompts_json=point_prompts_json,
+            box_prompts_json=box_prompts_json,
+            region_type=region_type,
+        )
 
 
 class NB2OpenAIImageEdit:
@@ -4091,15 +4332,27 @@ class NB2OpenAIImageEdit:
     def _resolve_api_key(self, api_key, api_key_env_var, looks_like_key, default_env_name, label):
         direct_key = _coerce_text_value(api_key)
         if direct_key:
-            if self._looks_like_env_var_name(direct_key) and not looks_like_key(direct_key):
+            if looks_like_key(direct_key):
+                return direct_key, "direct_input"
+            if self._looks_like_env_var_name(direct_key):
                 env_key = os.getenv(direct_key, "").strip()
                 if env_key:
+                    if not looks_like_key(env_key):
+                        raise ValueError(
+                            f"Environment variable {direct_key} is set but does not look like a valid {label} API key."
+                        )
                     logger.warning(
                         "%s image node received an environment variable name in api_key; resolving it from the environment.",
                         label,
                     )
                     return env_key, f"environment:{direct_key}"
-            return direct_key, "direct_input"
+                raise ValueError(
+                    f"api_key contains the environment variable name {direct_key}, but that variable is not set. "
+                    f"Paste the actual {label} key into api_key or put {direct_key} in api_key_env_var."
+                )
+            raise ValueError(
+                f"api_key does not look like a valid {label} API key."
+            )
 
         env_name = _coerce_text_value(api_key_env_var) or default_env_name
         if looks_like_key(env_name):
@@ -4120,6 +4373,10 @@ class NB2OpenAIImageEdit:
 
         env_key = os.getenv(env_name, "").strip()
         if env_key:
+            if not looks_like_key(env_key):
+                raise ValueError(
+                    f"Environment variable {env_name} is set but does not look like a valid {label} API key."
+                )
             return env_key, f"environment:{env_name}"
 
         raise ValueError(
@@ -4975,6 +5232,7 @@ NODE_CLASS_MAPPINGS = {
     "NB2AddAlpha":         NB2AddAlpha,
     "NB2Florence2RegionSelector": NB2Florence2RegionSelector,
     "NB2SAM3ImageSegmenter": NB2SAM3ImageSegmenter,
+    "NB2SAM3SmartRegionSelector": NB2SAM3SmartRegionSelector,
     "NB2OpenAIImageEdit": NB2OpenAIImageEdit,
     "NB2NanoBanana2Edit": NB2NanoBanana2Edit,
     "NB2Seedream45Edit": NB2Seedream45Edit,
@@ -4990,6 +5248,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NB2AddAlpha":         "🔲 NB2 Add Alpha",
     "NB2Florence2RegionSelector": "Florence-2 Smart Region Selector (FAL API)",
     "NB2SAM3ImageSegmenter": "SAM 3 Image Segmenter (FAL API)",
+    "NB2SAM3SmartRegionSelector": "SAM 3 Smart Region Selector (FAL API)",
     "SmartObjectIsolateCrop": "Smart Object Isolate Crop",
     "SmartMaskMultiStitch": "Smart Mask Multi Stitch",
     "NB2OpenAIImageEdit": "OpenAI GPT Image Edit",
