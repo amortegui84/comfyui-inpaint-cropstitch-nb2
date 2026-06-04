@@ -197,7 +197,7 @@ def _summarize_remote_error(error):
     if ("401 unauthorized" in lower or "403 forbidden" in lower) and "storage/auth/token" in lower:
         return (
             "FAL rejected the storage upload token request as unauthorized. "
-            "Check that the Florence node is using a valid FAL API key in the "
+            "Check that the FAL node is using a valid FAL API key in the "
             "format <key_id>:<key_secret>, that the key has API scope, and that "
             "ComfyUI was fully restarted after changing FAL_KEY. For a quick "
             "test, paste the FAL key directly into the node's api_key input."
@@ -4964,6 +4964,51 @@ class NB2OpenAIImageEdit:
                 return api_key, f"config:{os.path.basename(os.path.dirname(config_path)) or os.path.basename(config_path)}"
         return "", ""
 
+    def _is_fal_auth_error(self, error):
+        text = str(error).lower()
+        return ("401 unauthorized" in text or "403 forbidden" in text) and (
+            "storage/auth/token" in text or "unauthorized" in text or "forbidden" in text
+        )
+
+    def _fallback_fal_key_after_auth_error(self, fal_api_key, fal_api_key_source):
+        if fal_api_key_source.startswith("config:"):
+            return fal_api_key, fal_api_key_source, False
+        fallback_key, fallback_source = self._load_api_key_from_known_configs(
+            self._looks_like_fal_api_key,
+            "FAL",
+        )
+        if not fallback_key or fallback_key == fal_api_key:
+            return fal_api_key, fal_api_key_source, False
+        logger.warning(
+            "FAL upload auth failed with fal_api_key_source=%s; retrying with %s.",
+            fal_api_key_source,
+            fallback_source,
+        )
+        return fallback_key, fallback_source, True
+
+    def _upload_images_to_fal(self, input_images, fal_api_key, fal_api_key_source):
+        while True:
+            image_urls = []
+            input_size = None
+            try:
+                for index, input_image in enumerate(input_images, start=1):
+                    if input_image is None:
+                        continue
+                    image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
+                    if index == 1:
+                        input_size = current_size
+                    image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+                return image_urls, input_size, fal_api_key, fal_api_key_source
+            except Exception as upload_error:
+                if not self._is_fal_auth_error(upload_error):
+                    raise
+                fal_api_key, fal_api_key_source, did_fallback = self._fallback_fal_key_after_auth_error(
+                    fal_api_key,
+                    fal_api_key_source,
+                )
+                if not did_fallback:
+                    raise
+
     def _normalize_image_array_preserve_alpha(self, image):
         if isinstance(image, torch.Tensor):
             image_np = image.detach().cpu().numpy()
@@ -5287,6 +5332,7 @@ class NB2OpenAIImageEdit:
         output_format="png",
         sync_mode=False,
     ):
+        fal_api_key_source = "unresolved"
         try:
             fal_api_key, fal_api_key_source = self._resolve_api_key(
                 api_key,
@@ -5304,15 +5350,11 @@ class NB2OpenAIImageEdit:
             )
 
             input_images = [image_1, image_2, image_3, image_4, image_5, image_6]
-            image_urls = []
-            input_size = None
-            for index, input_image in enumerate(input_images, start=1):
-                if input_image is None:
-                    continue
-                image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
-                if index == 1:
-                    input_size = current_size
-                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            image_urls, input_size, fal_api_key, fal_api_key_source = self._upload_images_to_fal(
+                input_images,
+                fal_api_key,
+                fal_api_key_source,
+            )
             if input_size is None:
                 raise ValueError("image_1 is required.")
 
@@ -5405,8 +5447,10 @@ class NB2OpenAIImageEdit:
             return (output_batch.cpu(), json.dumps(info))
         except Exception as e:
             error_summary = _summarize_remote_error(e)
-            logger.error("OpenAI image edit failed: %s", error_summary)
-            raise RuntimeError(f"OpenAI image edit failed: {error_summary}") from e
+            logger.error("OpenAI image edit failed with fal_api_key_source=%s: %s", fal_api_key_source, error_summary)
+            raise RuntimeError(
+                f"OpenAI image edit failed (fal_api_key_source={fal_api_key_source}): {error_summary}"
+            ) from e
 
 
 class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
@@ -5512,6 +5556,7 @@ class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
         api_key="",
         api_key_env_var="FAL_KEY",
     ):
+        fal_api_key_source = "unresolved"
         try:
             fal_api_key, fal_api_key_source = self._resolve_api_key(
                 api_key,
@@ -5522,12 +5567,11 @@ class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
             )
 
             input_images = [image_1, image_2, image_3, image_4, image_5, image_6]
-            image_urls = []
-            for input_image in input_images:
-                if input_image is None:
-                    continue
-                image_bytes, _ = self._image_tensor_to_png_bytes(input_image)
-                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            image_urls, _input_size, fal_api_key, fal_api_key_source = self._upload_images_to_fal(
+                input_images,
+                fal_api_key,
+                fal_api_key_source,
+            )
             if not image_urls:
                 raise ValueError("image_1 is required.")
 
@@ -5582,8 +5626,10 @@ class NB2NanoBanana2Edit(NB2OpenAIImageEdit):
             return (output_batch.cpu(), json.dumps(info))
         except Exception as e:
             error_summary = _summarize_remote_error(e)
-            logger.error("Nano Banana 2 edit failed: %s", error_summary)
-            raise RuntimeError(f"Nano Banana 2 edit failed: {error_summary}") from e
+            logger.error("Nano Banana 2 edit failed with fal_api_key_source=%s: %s", fal_api_key_source, error_summary)
+            raise RuntimeError(
+                f"Nano Banana 2 edit failed (fal_api_key_source={fal_api_key_source}): {error_summary}"
+            ) from e
 
 
 class NB2Seedream45Edit(NB2OpenAIImageEdit):
@@ -5694,6 +5740,7 @@ class NB2Seedream45Edit(NB2OpenAIImageEdit):
         enable_safety_checker=True,
         sync_mode=False,
     ):
+        fal_api_key_source = "unresolved"
         try:
             fal_api_key, fal_api_key_source = self._resolve_api_key(
                 api_key,
@@ -5707,15 +5754,11 @@ class NB2Seedream45Edit(NB2OpenAIImageEdit):
                 image_1, image_2, image_3, image_4, image_5,
                 image_6, image_7, image_8, image_9, image_10,
             ]
-            image_urls = []
-            input_size = None
-            for index, input_image in enumerate(input_images, start=1):
-                if input_image is None:
-                    continue
-                image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
-                if index == 1:
-                    input_size = current_size
-                image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+            image_urls, input_size, fal_api_key, fal_api_key_source = self._upload_images_to_fal(
+                input_images,
+                fal_api_key,
+                fal_api_key_source,
+            )
             if not image_urls:
                 raise ValueError("image_1 is required.")
 
@@ -5774,8 +5817,10 @@ class NB2Seedream45Edit(NB2OpenAIImageEdit):
             return (output_batch.cpu(), json.dumps(info))
         except Exception as e:
             error_summary = _summarize_remote_error(e)
-            logger.error("Seedream 4.5 edit failed: %s", error_summary)
-            raise RuntimeError(f"Seedream 4.5 edit failed: {error_summary}") from e
+            logger.error("Seedream 4.5 edit failed with fal_api_key_source=%s: %s", fal_api_key_source, error_summary)
+            raise RuntimeError(
+                f"Seedream 4.5 edit failed (fal_api_key_source={fal_api_key_source}): {error_summary}"
+            ) from e
 
 
 # ===========================================================================
