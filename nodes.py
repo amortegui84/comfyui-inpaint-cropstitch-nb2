@@ -33,6 +33,7 @@ Intended workflow
 
 import comfy.utils
 import comfy.model_management
+import configparser
 import io
 import json
 import logging
@@ -3023,7 +3024,9 @@ class NB2Florence2RegionSelector:
     The API key is never stored in code. Users can either:
     - paste it into the `api_key` input for the current session, or
     - leave `api_key` blank and provide it via an environment variable
-      such as FAL_KEY.
+      such as FAL_KEY, or
+    - keep using fal-flux-nodes/config.ini when that node pack is installed
+      alongside this one.
     """
 
     REGION_TYPE_OPTIONS = ["glasses", "face", "upper_body", "lower_body", "full_body", "object"]
@@ -3153,6 +3156,38 @@ class NB2Florence2RegionSelector:
             return False
         return candidate.replace("_", "a").isalnum()
 
+    def _read_api_key_from_config(self, config_path):
+        if not config_path or not os.path.exists(config_path):
+            return ""
+        try:
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            api_key = config.get("fal", "api_key", fallback="").strip()
+        except Exception as e:
+            logger.warning("Failed to read FAL config %s: %s", config_path, e)
+            return ""
+
+        if not api_key or api_key == "your_fal_api_key_here":
+            return ""
+        if not self._looks_like_api_key(api_key):
+            logger.warning("FAL config %s has an api_key value, but it does not look valid.", config_path)
+            return ""
+        return api_key
+
+    def _load_api_key_from_known_configs(self):
+        node_dir = os.path.dirname(os.path.abspath(__file__))
+        custom_nodes_dir = os.path.dirname(node_dir)
+        config_paths = [
+            os.path.join(node_dir, "config.ini"),
+            os.path.join(custom_nodes_dir, "fal-flux-nodes", "config.ini"),
+        ]
+        for config_path in config_paths:
+            api_key = self._read_api_key_from_config(config_path)
+            if api_key:
+                logger.info("Using FAL API key from %s", config_path)
+                return api_key, f"config:{os.path.basename(os.path.dirname(config_path)) or os.path.basename(config_path)}"
+        return "", ""
+
     def _resolve_api_key(self, api_key, api_key_env_var):
         direct_key = self._coerce_text(api_key)
         if direct_key:
@@ -3202,8 +3237,13 @@ class NB2Florence2RegionSelector:
                 )
             return env_key, f"environment:{env_name}"
 
+        config_key, config_source = self._load_api_key_from_known_configs()
+        if config_key:
+            return config_key, config_source
+
         raise ValueError(
-            f"Missing FAL API key. Paste it into api_key or set the environment variable {env_name}."
+            f"Missing FAL API key. Paste it into api_key, set the environment variable {env_name}, "
+            "or configure fal-flux-nodes/config.ini."
         )
 
     def _get_fal_client(self):
@@ -3233,6 +3273,12 @@ class NB2Florence2RegionSelector:
             "504",
         )
         return any(marker in text for marker in retry_markers)
+
+    def _is_fal_auth_error(self, error):
+        text = str(error).lower()
+        return ("401 unauthorized" in text or "403 forbidden" in text) and (
+            "storage/auth/token" in text or "unauthorized" in text or "forbidden" in text
+        )
 
     def _with_retries(self, label, operation, attempts=3):
         last_error = None
@@ -3322,45 +3368,32 @@ class NB2Florence2RegionSelector:
 
     def _upload_image(self, image_tensor, api_key, max_dimension=None):
         fal_client = self._get_fal_client()
-        previous_key = os.environ.get("FAL_KEY")
-        os.environ["FAL_KEY"] = api_key
-        try:
-            img_bytes, original_size, uploaded_size = self._prepare_image_for_upload(
-                image_tensor,
-                max_dimension=max_dimension,
-            )
-            image_url = self._with_retries(
-                "image upload",
-                lambda: fal_client.upload(
-                    img_bytes,
-                    "image/png",
-                ),
-            )
-            return image_url, original_size, uploaded_size
-        finally:
-            if previous_key is None:
-                os.environ.pop("FAL_KEY", None)
-            else:
-                os.environ["FAL_KEY"] = previous_key
+        client = fal_client.SyncClient(key=api_key)
+        img_bytes, original_size, uploaded_size = self._prepare_image_for_upload(
+            image_tensor,
+            max_dimension=max_dimension,
+        )
+        image_url = self._with_retries(
+            "image upload",
+            lambda: client.upload(
+                img_bytes,
+                "image/png",
+            ),
+        )
+        return image_url, original_size, uploaded_size
 
     def _call_api(self, endpoint, arguments, api_key):
         fal_client = self._get_fal_client()
-        previous_key = os.environ.get("FAL_KEY")
-        os.environ["FAL_KEY"] = api_key
+        client = fal_client.SyncClient(key=api_key)
         try:
             result = self._with_retries(
                 f"API call {endpoint}",
-                lambda: fal_client.run(endpoint, arguments=arguments),
+                lambda: client.run(endpoint, arguments=arguments),
             )
             logger.debug("FAL API response from %s: %s", endpoint, json.dumps(result))
             return result
         except Exception as e:
             raise RuntimeError(f"Failed to call FAL endpoint {endpoint}: {str(e)}") from e
-        finally:
-            if previous_key is None:
-                os.environ.pop("FAL_KEY", None)
-            else:
-                os.environ["FAL_KEY"] = previous_key
 
     def _is_point_pair(self, value):
         return (
@@ -3609,6 +3642,7 @@ class NB2Florence2RegionSelector:
         upload_max_dimension=2048,
         detection_mode="auto",
     ):
+        api_key_source = "unresolved"
         try:
             if not isinstance(image, torch.Tensor):
                 raise ValueError("image input must be a ComfyUI IMAGE tensor.")
@@ -3623,11 +3657,30 @@ class NB2Florence2RegionSelector:
 
             resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
             query = self._build_query(region_type, custom_text)
-            image_url, original_size, uploaded_size = self._upload_image(
-                image,
-                resolved_api_key,
-                max_dimension=int(upload_max_dimension),
-            )
+            try:
+                image_url, original_size, uploaded_size = self._upload_image(
+                    image,
+                    resolved_api_key,
+                    max_dimension=int(upload_max_dimension),
+                )
+            except Exception as upload_error:
+                if not self._is_fal_auth_error(upload_error) or api_key_source.startswith("config:"):
+                    raise
+                fallback_key, fallback_source = self._load_api_key_from_known_configs()
+                if not fallback_key or fallback_key == resolved_api_key:
+                    raise
+                logger.warning(
+                    "FAL upload auth failed with api_key_source=%s; retrying with %s.",
+                    api_key_source,
+                    fallback_source,
+                )
+                resolved_api_key = fallback_key
+                api_key_source = fallback_source
+                image_url, original_size, uploaded_size = self._upload_image(
+                    image,
+                    resolved_api_key,
+                    max_dimension=int(upload_max_dimension),
+                )
             image_np = self._normalize_image_array(image[0:1])
             height, width = image_np.shape[:2]
 
@@ -3739,8 +3792,491 @@ class NB2Florence2RegionSelector:
             )
         except Exception as e:
             error_summary = _summarize_remote_error(e)
-            logger.error("Florence region selection failed: %s", error_summary)
-            raise RuntimeError(f"Florence region selection failed: {error_summary}") from e
+            logger.error("Florence region selection failed with api_key_source=%s: %s", api_key_source, error_summary)
+            raise RuntimeError(
+                f"Florence region selection failed (api_key_source={api_key_source}): {error_summary}"
+            ) from e
+
+
+class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
+    """
+    Select semantic regions through FAL's SAM 3 image endpoint.
+
+    Outputs intentionally match NB2Florence2RegionSelector so the same crop,
+    stitch, and local edit nodes can be reused without graph changes.
+    """
+
+    SELECTION_MODE_OPTIONS = ["largest", "first", "merge_all"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "prompt": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "garment",
+                        "placeholder": "Text prompt, e.g. bra, pants, glasses, wheel",
+                    },
+                ),
+            },
+            "optional": {
+                "selection_mode": (cls.SELECTION_MODE_OPTIONS, {"default": "largest"}),
+                "padding_percent": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
+                "return_rect_mask": ("BOOLEAN", {"default": False}),
+                "api_key": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Optional. Leave blank to use FAL_KEY",
+                    },
+                ),
+                "api_key_env_var": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "FAL_KEY",
+                        "placeholder": "Environment variable fallback",
+                    },
+                ),
+                "mask_blur_percent": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "tooltip": "Soft blur applied to the returned SAM mask.",
+                    },
+                ),
+                "upload_max_dimension": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 512,
+                        "max": 4096,
+                        "step": 64,
+                    },
+                ),
+                "return_multiple_masks": ("BOOLEAN", {"default": True}),
+                "max_masks": ("INT", {"default": 3, "min": 1, "max": 32, "step": 1}),
+                "include_scores": ("BOOLEAN", {"default": True}),
+                "include_boxes": ("BOOLEAN", {"default": True}),
+                "point_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x\": 100, \"y\": 120, \"label\": 1}]",
+                    },
+                ),
+                "box_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x_min\": 10, \"y_min\": 20, \"x_max\": 300, \"y_max\": 400}]",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "IMAGE", "STRING", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "mask",
+        "mask_image",
+        "info",
+        "center_x",
+        "center_y",
+        "crop_width",
+        "crop_height",
+    )
+    FUNCTION = "segment_image"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Selects a region using FAL SAM 3 image segmentation. "
+        "API key can be provided by input or FAL_KEY environment variable."
+    )
+
+    def _parse_prompt_list(self, value, label):
+        text = _coerce_text_value(value)
+        if not text:
+            return []
+        data = _safe_json_loads(text)
+        if not isinstance(data, list):
+            raise ValueError(f"{label} must be a JSON list.")
+        return data
+
+    def _download_mask_image(self, image_ref):
+        url = ""
+        if isinstance(image_ref, dict):
+            url = _coerce_text_value(image_ref.get("url"))
+        elif isinstance(image_ref, str):
+            url = _coerce_text_value(image_ref)
+        if not url:
+            raise RuntimeError("SAM 3 returned a mask without a URL.")
+
+        if url.startswith("data:"):
+            header, _, payload = url.partition(",")
+            if ";base64" not in header:
+                raise RuntimeError("Unsupported SAM 3 data URI mask payload.")
+            import base64
+            content = base64.b64decode(payload)
+        else:
+            response = requests.get(url, timeout=300)
+            response.raise_for_status()
+            content = response.content
+
+        pil_image = Image.open(io.BytesIO(content))
+        pil_image.load()
+        if pil_image.mode == "RGBA":
+            alpha = np.asarray(pil_image.getchannel("A"), dtype=np.uint8)
+            rgb = np.asarray(pil_image.convert("RGB"), dtype=np.uint8)
+            gray = np.maximum(np.max(rgb, axis=-1), alpha)
+        else:
+            gray = np.asarray(pil_image.convert("L"), dtype=np.uint8)
+        return gray
+
+    def _select_mask(self, masks_uint8, selection_mode):
+        if not masks_uint8:
+            raise RuntimeError("SAM 3 returned no usable masks.")
+        if selection_mode == "merge_all":
+            merged = np.zeros_like(masks_uint8[0], dtype=np.uint8)
+            for mask in masks_uint8:
+                merged = np.maximum(merged, mask)
+            return merged, "merge_all", len(masks_uint8)
+        if selection_mode == "first":
+            return masks_uint8[0], "first", len(masks_uint8)
+        return max(masks_uint8, key=lambda m: int(np.count_nonzero(m > 0))), "largest", len(masks_uint8)
+
+    def segment_image(
+        self,
+        image,
+        prompt,
+        selection_mode="largest",
+        padding_percent=0.0,
+        return_rect_mask=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+        mask_blur_percent=0.0,
+        upload_max_dimension=2048,
+        return_multiple_masks=True,
+        max_masks=3,
+        include_scores=True,
+        include_boxes=True,
+        point_prompts_json="",
+        box_prompts_json="",
+        region_type="object",
+    ):
+        try:
+            if not isinstance(image, torch.Tensor):
+                raise ValueError("image input must be a ComfyUI IMAGE tensor.")
+            if image.ndim != 4:
+                raise ValueError(
+                    f"Expected IMAGE tensor with shape [B,H,W,C], got {tuple(image.shape)}."
+                )
+            if image.shape[0] != 1:
+                raise ValueError("NB2SAM3ImageSegmenter currently supports batch size 1 only.")
+
+            resolved_api_key, api_key_source = self._resolve_api_key(api_key, api_key_env_var)
+            image_url, original_size, uploaded_size = self._upload_image(
+                image,
+                resolved_api_key,
+                max_dimension=int(upload_max_dimension),
+            )
+            image_np = self._normalize_image_array(image[0:1])
+            height, width = image_np.shape[:2]
+            point_prompts = self._parse_prompt_list(point_prompts_json, "point_prompts_json")
+            box_prompts = self._parse_prompt_list(box_prompts_json, "box_prompts_json")
+
+            arguments = {
+                "image_url": image_url,
+                "prompt": _coerce_text_value(prompt),
+                "point_prompts": point_prompts,
+                "box_prompts": box_prompts,
+                "apply_mask": False,
+                "output_format": "png",
+                "return_multiple_masks": bool(return_multiple_masks),
+                "max_masks": int(max_masks),
+                "include_scores": bool(include_scores),
+                "include_boxes": bool(include_boxes),
+            }
+            result = self._call_api("fal-ai/sam-3/image", arguments, resolved_api_key)
+            mask_entries = result.get("masks") if isinstance(result, dict) else None
+            if not mask_entries:
+                primary = result.get("image") if isinstance(result, dict) else None
+                mask_entries = [primary] if primary else []
+
+            masks_uint8 = []
+            mask_sizes = []
+            for entry in mask_entries:
+                mask_uint8 = self._download_mask_image(entry)
+                mask_sizes.append({"width": int(mask_uint8.shape[1]), "height": int(mask_uint8.shape[0])})
+                if mask_uint8.shape[:2] != (height, width):
+                    pil_mask = Image.fromarray(mask_uint8, mode="L")
+                    pil_mask = pil_mask.resize((width, height), Image.BILINEAR)
+                    mask_uint8 = np.asarray(pil_mask, dtype=np.uint8)
+                masks_uint8.append(mask_uint8)
+
+            selected_mask, selected_source, returned_mask_count = self._select_mask(
+                masks_uint8,
+                selection_mode,
+            )
+            selected_mask = np.where(selected_mask > 0, 255, 0).astype(np.uint8)
+            bbox = self._mask_bbox(selected_mask)
+            padded_bbox = self._apply_padding(bbox, width, height, padding_percent)
+
+            if return_rect_mask:
+                output_mask_uint8 = self._rect_mask_from_bbox(width, height, padded_bbox)
+            else:
+                output_mask_uint8 = selected_mask.copy()
+            if mask_blur_percent > 0.0:
+                output_mask_uint8 = _blur_uint8_mask(output_mask_uint8, mask_blur_percent)
+
+            center_x = int(round((padded_bbox[0] + padded_bbox[2]) / 2.0))
+            center_y = int(round((padded_bbox[1] + padded_bbox[3]) / 2.0))
+            crop_width = int(padded_bbox[2] - padded_bbox[0])
+            crop_height = int(padded_bbox[3] - padded_bbox[1])
+
+            mask_tensor, mask_image_tensor = self._mask_to_outputs(output_mask_uint8)
+            region_type = _coerce_text_value(region_type) or "object"
+            recommended_aspect_ratio = _recommend_aspect_ratio_for_region(region_type, padded_bbox)
+            region_edit_hints = _get_region_edit_hints(region_type)
+            metadata = result.get("metadata") if isinstance(result, dict) else None
+            info = {
+                "region_type": region_type,
+                "query": _coerce_text_value(prompt),
+                "source": "fal-ai/sam-3/image",
+                "selection_mode": selection_mode,
+                "selected_mask_source": selected_source,
+                "returned_mask_count": int(returned_mask_count),
+                "padding_percent": float(padding_percent),
+                "mask_blur_percent": float(mask_blur_percent),
+                "upload_max_dimension": int(upload_max_dimension),
+                "api_key_source": api_key_source,
+                "recommended_aspect_ratio": recommended_aspect_ratio,
+                "recommended_edit_size": _recommend_edit_size_for_aspect_ratio(recommended_aspect_ratio),
+                "recommended_mask_expand_percent": float(region_edit_hints["mask_expand_percent"]),
+                "recommended_mask_feather_percent": float(region_edit_hints["mask_feather_percent"]),
+                "recommended_context_expand": float(region_edit_hints["context_expand"]),
+                "original_size": {"width": int(original_size[0]), "height": int(original_size[1])},
+                "uploaded_size": {"width": int(uploaded_size[0]), "height": int(uploaded_size[1])},
+                "mask_sizes": mask_sizes,
+                "metadata": metadata,
+                "bbox": {
+                    "x1": int(padded_bbox[0]),
+                    "y1": int(padded_bbox[1]),
+                    "x2": int(padded_bbox[2]),
+                    "y2": int(padded_bbox[3]),
+                },
+                "center_x": center_x,
+                "center_y": center_y,
+                "crop_width": crop_width,
+                "crop_height": crop_height,
+            }
+
+            return (
+                mask_tensor,
+                mask_image_tensor,
+                json.dumps(info),
+                center_x,
+                center_y,
+                crop_width,
+                crop_height,
+            )
+        except Exception as e:
+            error_summary = _summarize_remote_error(e)
+            logger.error("SAM 3 image segmentation failed: %s", error_summary)
+            raise RuntimeError(f"SAM 3 image segmentation failed: {error_summary}") from e
+
+
+class NB2SAM3SmartRegionSelector(NB2SAM3ImageSegmenter):
+    """
+    SAM 3 selector with the same preset-driven UX as the Florence selector.
+
+    Use `object` when you want to provide an arbitrary text prompt. The outputs
+    intentionally match Florence and the free-prompt SAM node.
+    """
+
+    REGION_TYPE_OPTIONS = [
+        "face",
+        "upper_body",
+        "lower_body",
+        "full_body",
+        "hair",
+        "glasses",
+        "hat",
+        "shirt",
+        "top",
+        "bra",
+        "pants",
+        "skirt",
+        "dress",
+        "shoes",
+        "bag",
+        "car",
+        "vehicle",
+        "wheel",
+        "object",
+    ]
+    REGION_QUERY_MAP = {
+        "face": "face",
+        "upper_body": "upper body",
+        "lower_body": "lower body",
+        "full_body": "full body person",
+        "hair": "hair",
+        "glasses": "glasses",
+        "hat": "hat",
+        "shirt": "shirt",
+        "top": "top garment",
+        "bra": "bra",
+        "pants": "pants",
+        "skirt": "skirt",
+        "dress": "dress",
+        "shoes": "shoes",
+        "bag": "bag",
+        "car": "car",
+        "vehicle": "vehicle",
+        "wheel": "wheel",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "region_type": (cls.REGION_TYPE_OPTIONS, {"default": "object"}),
+            },
+            "optional": {
+                "custom_text": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Required when region_type is object",
+                    },
+                ),
+                "selection_mode": (cls.SELECTION_MODE_OPTIONS, {"default": "largest"}),
+                "padding_percent": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
+                "return_rect_mask": ("BOOLEAN", {"default": False}),
+                "api_key": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "",
+                        "placeholder": "Optional. Leave blank to use FAL_KEY",
+                    },
+                ),
+                "api_key_env_var": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "default": "FAL_KEY",
+                        "placeholder": "Environment variable fallback",
+                    },
+                ),
+                "mask_blur_percent": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "tooltip": "Soft blur applied to the returned SAM mask.",
+                    },
+                ),
+                "upload_max_dimension": (
+                    "INT",
+                    {"default": 2048, "min": 512, "max": 4096, "step": 64},
+                ),
+                "return_multiple_masks": ("BOOLEAN", {"default": True}),
+                "max_masks": ("INT", {"default": 3, "min": 1, "max": 32, "step": 1}),
+                "include_scores": ("BOOLEAN", {"default": True}),
+                "include_boxes": ("BOOLEAN", {"default": True}),
+                "point_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x\": 100, \"y\": 120, \"label\": 1}]",
+                    },
+                ),
+                "box_prompts_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "[{\"x_min\": 10, \"y_min\": 20, \"x_max\": 300, \"y_max\": 400}]",
+                    },
+                ),
+            },
+        }
+
+    FUNCTION = "select_region"
+    CATEGORY = "inpaint/api"
+    DESCRIPTION = (
+        "Select one semantic region using SAM 3 through FAL. Includes body, "
+        "garment, vehicle, and object/custom presets."
+    )
+
+    def _build_sam_query(self, region_type, custom_text):
+        region_type = _coerce_text_value(region_type) or "object"
+        custom_text = _coerce_text_value(custom_text)
+        if region_type == "object":
+            if not custom_text:
+                raise ValueError("custom_text is required when region_type is object.")
+            return custom_text
+        if custom_text:
+            raise ValueError("custom_text can only be used when region_type is object.")
+        return self.REGION_QUERY_MAP[region_type]
+
+    def select_region(
+        self,
+        image,
+        region_type,
+        custom_text="",
+        selection_mode="largest",
+        padding_percent=0.0,
+        return_rect_mask=False,
+        api_key="",
+        api_key_env_var="FAL_KEY",
+        mask_blur_percent=0.0,
+        upload_max_dimension=2048,
+        return_multiple_masks=True,
+        max_masks=3,
+        include_scores=True,
+        include_boxes=True,
+        point_prompts_json="",
+        box_prompts_json="",
+    ):
+        prompt = self._build_sam_query(region_type, custom_text)
+        return self.segment_image(
+            image=image,
+            prompt=prompt,
+            selection_mode=selection_mode,
+            padding_percent=padding_percent,
+            return_rect_mask=return_rect_mask,
+            api_key=api_key,
+            api_key_env_var=api_key_env_var,
+            mask_blur_percent=mask_blur_percent,
+            upload_max_dimension=upload_max_dimension,
+            return_multiple_masks=return_multiple_masks,
+            max_masks=max_masks,
+            include_scores=include_scores,
+            include_boxes=include_boxes,
+            point_prompts_json=point_prompts_json,
+            box_prompts_json=box_prompts_json,
+            region_type=region_type,
+        )
 
 
 class NB2SAM3ImageSegmenter(NB2Florence2RegionSelector):
@@ -4379,8 +4915,13 @@ class NB2OpenAIImageEdit:
                 )
             return env_key, f"environment:{env_name}"
 
+        config_key, config_source = self._load_api_key_from_known_configs(looks_like_key, label)
+        if config_key:
+            return config_key, config_source
+
         raise ValueError(
-            f"Missing {label} API key. Paste it into api_key or set the environment variable {env_name}."
+            f"Missing {label} API key. Paste it into api_key, set the environment variable {env_name}, "
+            "or configure fal-flux-nodes/config.ini."
         )
 
     def _resolve_optional_api_key(self, api_key, api_key_env_var, looks_like_key, default_env_name, label):
@@ -4388,6 +4929,40 @@ class NB2OpenAIImageEdit:
             return self._resolve_api_key(api_key, api_key_env_var, looks_like_key, default_env_name, label)
         except ValueError:
             return "", "none"
+
+    def _read_api_key_from_config(self, config_path, looks_like_key, label):
+        if label != "FAL" or not config_path or not os.path.exists(config_path):
+            return ""
+        try:
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            api_key = config.get("fal", "api_key", fallback="").strip()
+        except Exception as e:
+            logger.warning("Failed to read FAL config %s: %s", config_path, e)
+            return ""
+
+        if not api_key or api_key == "your_fal_api_key_here":
+            return ""
+        if not looks_like_key(api_key):
+            logger.warning("FAL config %s has an api_key value, but it does not look valid.", config_path)
+            return ""
+        return api_key
+
+    def _load_api_key_from_known_configs(self, looks_like_key, label):
+        if label != "FAL":
+            return "", ""
+        node_dir = os.path.dirname(os.path.abspath(__file__))
+        custom_nodes_dir = os.path.dirname(node_dir)
+        config_paths = [
+            os.path.join(node_dir, "config.ini"),
+            os.path.join(custom_nodes_dir, "fal-flux-nodes", "config.ini"),
+        ]
+        for config_path in config_paths:
+            api_key = self._read_api_key_from_config(config_path, looks_like_key, label)
+            if api_key:
+                logger.info("Using FAL API key from %s", config_path)
+                return api_key, f"config:{os.path.basename(os.path.dirname(config_path)) or os.path.basename(config_path)}"
+        return "", ""
 
     def _normalize_image_array_preserve_alpha(self, image):
         if isinstance(image, torch.Tensor):
@@ -4644,37 +5219,24 @@ class NB2OpenAIImageEdit:
 
     def _upload_to_fal(self, data_bytes, mime_type, fal_api_key):
         fal_client = self._get_fal_client()
-        previous_key = os.environ.get("FAL_KEY")
-        os.environ["FAL_KEY"] = fal_api_key
-        try:
-            return self._with_retries(
-                "image upload",
-                lambda: fal_client.upload(data_bytes, mime_type),
-            )
-        finally:
-            if previous_key is None:
-                os.environ.pop("FAL_KEY", None)
-            else:
-                os.environ["FAL_KEY"] = previous_key
+        client = fal_client.SyncClient(key=fal_api_key)
+        return self._with_retries(
+            "image upload",
+            lambda: client.upload(data_bytes, mime_type),
+        )
 
     def _call_fal(self, endpoint, arguments, fal_api_key):
         fal_client = self._get_fal_client()
-        previous_key = os.environ.get("FAL_KEY")
-        os.environ["FAL_KEY"] = fal_api_key
+        client = fal_client.SyncClient(key=fal_api_key)
         try:
             result = self._with_retries(
                 f"API call {endpoint}",
-                lambda: fal_client.run(endpoint, arguments=arguments),
+                lambda: client.run(endpoint, arguments=arguments),
             )
             logger.debug("FAL GPT Image response from %s: %s", endpoint, json.dumps(result))
             return result
         except Exception as e:
             raise RuntimeError(f"Failed to call FAL endpoint {endpoint}: {str(e)}") from e
-        finally:
-            if previous_key is None:
-                os.environ.pop("FAL_KEY", None)
-            else:
-                os.environ["FAL_KEY"] = previous_key
 
     def _extract_result_image_url(self, result):
         if not isinstance(result, dict):

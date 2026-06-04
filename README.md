@@ -75,7 +75,8 @@ Security notes:
 
 - The repo does not store any API key.
 - Bundled visual workflows leave `api_key` empty. API prompt examples use `__FAL_KEY__` as a placeholder that you must replace before posting to `/prompt`.
-- For safer usage, prefer setting `FAL_KEY` in the environment and keep `api_key` blank.
+- FAL nodes resolve keys in this order: direct `api_key`, environment variable from `api_key_env_var` (default `FAL_KEY`), this repo's optional `config.ini`, then a sibling `fal-flux-nodes/config.ini` if that node pack is installed.
+- For safer usage, prefer setting `FAL_KEY` in the environment or paste the key only for the current ComfyUI session.
 - If you paste a key into the node and save the workflow yourself, ComfyUI may persist that widget value into the workflow JSON.
 
 Typical flow:
@@ -557,7 +558,7 @@ git lfs pull
 
 **Cause:** FAL rejected the upload-token request before the Florence or edit model ran. This means the ComfyUI process is not receiving a valid FAL key, or the key was pasted into the wrong field.
 
-**Fix:** Paste your FAL key directly into each FAL node's `api_key` input for a quick test, or set `FAL_KEY` before launching ComfyUI and fully restart it. The key should look like `<key_id>:<key_secret>` or a valid `fal_...` key. Keep `api_key_env_var` as `FAL_KEY` unless you intentionally use a different environment variable name.
+**Fix:** Paste your FAL key directly into each FAL node's `api_key` input for a quick test, set `FAL_KEY` before launching ComfyUI and fully restart it, or configure `fal-flux-nodes/config.ini` if you already use that node pack. The key should look like `<key_id>:<key_secret>` or a valid `fal_...` key. Keep `api_key_env_var` as `FAL_KEY` unless you intentionally use a different environment variable name.
 
 ---
 
