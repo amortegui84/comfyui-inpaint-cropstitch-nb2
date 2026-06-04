@@ -4779,6 +4779,7 @@ class NB2OpenAIImageEdit:
     ]
     FORMAT_OPTIONS = ["png", "webp", "jpeg"]
     RESOLUTION_OPTIONS = ["1K", "2K", "4K"]
+    FAL_MAX_UPLOAD_BYTES = 24_500_000
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -4994,10 +4995,13 @@ class NB2OpenAIImageEdit:
                 for index, input_image in enumerate(input_images, start=1):
                     if input_image is None:
                         continue
-                    image_bytes, current_size = self._image_tensor_to_png_bytes(input_image)
+                    image_bytes, current_size, mime_type = self._image_tensor_to_upload_bytes(
+                        input_image,
+                        label=f"image_{index}",
+                    )
                     if index == 1:
                         input_size = current_size
-                    image_urls.append(self._upload_to_fal(image_bytes, "image/png", fal_api_key))
+                    image_urls.append(self._upload_to_fal(image_bytes, mime_type, fal_api_key))
                 return image_urls, input_size, fal_api_key, fal_api_key_source
             except Exception as upload_error:
                 if not self._is_fal_auth_error(upload_error):
@@ -5039,8 +5043,60 @@ class NB2OpenAIImageEdit:
         mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
         image = Image.fromarray(image_np[..., :4] if mode == "RGBA" else image_np[..., :3], mode=mode)
         buf = io.BytesIO()
-        image.save(buf, format="PNG")
+        image.save(buf, format="PNG", optimize=True, compress_level=9)
         return buf.getvalue(), image.size
+
+    def _image_tensor_to_upload_bytes(self, image_tensor, label="image"):
+        image_np = self._normalize_image_array_preserve_alpha(image_tensor)
+        mode = "RGBA" if image_np.shape[-1] == 4 else "RGB"
+        image = Image.fromarray(image_np[..., :4] if mode == "RGBA" else image_np[..., :3], mode=mode)
+
+        buf = io.BytesIO()
+        image.save(buf, format="PNG", optimize=True, compress_level=9)
+        png_bytes = buf.getvalue()
+        if len(png_bytes) <= self.FAL_MAX_UPLOAD_BYTES:
+            return png_bytes, image.size, "image/png"
+
+        rgb_image = image.convert("RGB")
+        for quality in (92, 86, 80, 74, 68):
+            buf = io.BytesIO()
+            rgb_image.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
+            jpeg_bytes = buf.getvalue()
+            if len(jpeg_bytes) <= self.FAL_MAX_UPLOAD_BYTES:
+                logger.info(
+                    "Compressed %s for FAL upload from %.1fMB PNG to %.1fMB JPEG quality=%s.",
+                    label,
+                    len(png_bytes) / 1_000_000.0,
+                    len(jpeg_bytes) / 1_000_000.0,
+                    quality,
+                )
+                return jpeg_bytes, image.size, "image/jpeg"
+
+        current = rgb_image
+        quality = 82
+        while True:
+            width, height = current.size
+            scale = math.sqrt(self.FAL_MAX_UPLOAD_BYTES / max(1, len(jpeg_bytes))) * 0.92
+            scale = min(0.92, max(0.35, scale))
+            new_size = (max(64, int(width * scale)), max(64, int(height * scale)))
+            if new_size == current.size:
+                new_size = (max(64, width - 16), max(64, height - 16))
+            current = current.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            current.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
+            jpeg_bytes = buf.getvalue()
+            if len(jpeg_bytes) <= self.FAL_MAX_UPLOAD_BYTES or min(current.size) <= 64:
+                logger.warning(
+                    "Downscaled %s for FAL upload from %sx%s %.1fMB PNG to %sx%s %.1fMB JPEG.",
+                    label,
+                    image.size[0],
+                    image.size[1],
+                    len(png_bytes) / 1_000_000.0,
+                    current.size[0],
+                    current.size[1],
+                    len(jpeg_bytes) / 1_000_000.0,
+                )
+                return jpeg_bytes, current.size, "image/jpeg"
 
     def _mask_tensor_to_png_bytes(self, mask_image, target_size):
         mask_np = NB2Florence2RegionSelector()._normalize_image_array(mask_image)
